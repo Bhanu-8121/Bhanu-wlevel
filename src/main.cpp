@@ -17,8 +17,8 @@ Espalexa espalexa;
 
 // ===== WIFI =====
 // !!! UPDATE YOUR WIFI CREDENTIALS HERE !!!
-const char* ssid = "test";
-const char* password = "123456789";
+const char* ssid = "KBC Hotspot";
+const char* password = "fpMD@143";
 
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org", 19800, 60000);  // IST
