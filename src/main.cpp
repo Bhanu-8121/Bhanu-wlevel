@@ -17,11 +17,12 @@ Espalexa espalexa;
 
 // ===== WIFI =====
 // !!! UPDATE YOUR WIFI CREDENTIALS HERE !!!
-const char* ssid = "KBC Hotspot";
-const char* password = "fpMD@143";
+const char* ssid = "test";
+const char* password = "123456789";
 
 WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "pool.ntp.org", 19800, 60000);  // IST
+// Update interval set to 60000ms (60 seconds)
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 19800, 60000);  // IST (+05:30)
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
@@ -65,6 +66,7 @@ const unsigned long debounceDelay = 50;
 bool timeSynced = false;
 unsigned long lastSyncMillis = 0;
 unsigned long offsetSeconds = 0;
+unsigned long lastNtpResync = 0;
 
 // ===== WEB OTA SETUP =====
 void setupWebOTA() {
@@ -77,7 +79,6 @@ void setupWebOTA() {
 }
 
 // ===== NEW --- ALEXA CALLBACK =====
-// This function is called when Alexa changes the "Motor" state
 void relayChanged(uint8_t brightness) {
   Serial.print("Alexa command received: ");
   if (brightness > 0) {
@@ -87,7 +88,6 @@ void relayChanged(uint8_t brightness) {
     Serial.println("OFF");
     motorON = false; // Set the master variable
   }
-  // The main loop will handle sensor overrides and update the relay/LCD
 }
 
 
@@ -131,8 +131,15 @@ void setup() {
 void loop() {
   // --- Core Services ---
   server.handleClient();   // Handle HTTP requests for OTA
+  
   if (wifiOK) {
     espalexa.loop();       // Handle Alexa requests
+    
+    // --- TIME FIX ---
+    // Periodically call update() to re-sync time.
+    // The NTPClient library is smart and will only fetch
+    // from the server based on the 60-second interval.
+    timeClient.update();
   }
 
   // --- WiFi Connection Management (non-blocking) ---
@@ -153,15 +160,28 @@ void loop() {
     
     // 1. Sync Time
     timeClient.begin();
-    timeClient.update();
-    timeSynced = true;
-    lastSyncMillis = millis();
-    offsetSeconds = timeClient.getHours()*3600 + timeClient.getMinutes()*60 + timeClient.getSeconds();
+    Serial.print("Syncing time... ");
+
+    // --- TIME FIX ---
+    // Use forceUpdate() to wait for a valid time reply.
+    // This prevents the "5:30" bug.
+    if (timeClient.forceUpdate()) {
+        Serial.println("Success.");
+        timeSynced = true;
+        lastSyncMillis = millis(); // Store the *real* time of this sync
+        lastNtpResync = millis();
+        // Get the *actual* current time
+        offsetSeconds = timeClient.getHours()*3600 + timeClient.getMinutes()*60 + timeClient.getSeconds();
+        Serial.printf("Time set to: %s\n", timeClient.getFormattedTime().c_str());
+    } else {
+        Serial.println("Failed.");
+        timeSynced = false; // Don't try to use the soft-RTC
+    }
 
     // 2. Start Alexa
     espalexa.addDevice("Motor", relayChanged);
     espalexa.begin();
-    Serial.println("WiFi Connected. Espalexa Started.");
+    Serial.println("Espalexa Started.");
 
     lcd.setCursor(0,1); lcd.print("WiFi Connected  ");
     delay(1000);
@@ -184,6 +204,18 @@ void loop() {
   // --- Time Update ---
   String currentTime = "--:--";
   if (timeSynced) {
+    
+    // --- TIME FIX ---
+    // The timeClient.update() runs in the background.
+    // Let's re-read the "base" time from it every 10 minutes
+    // to prevent our soft-RTC from drifting.
+    if (millis() - lastNtpResync > 600000) { // 10 minutes
+        lastNtpResync = millis();
+        lastSyncMillis = millis();
+        offsetSeconds = timeClient.getHours()*3600 + timeClient.getMinutes()*60 + timeClient.getSeconds();
+        Serial.println("NTP soft-RTC re-synced.");
+    }
+
     unsigned long elapsed = (millis() - lastSyncMillis)/1000;
     unsigned long total = offsetSeconds + elapsed;
     int h = (total/3600) % 24;
@@ -238,8 +270,6 @@ void loop() {
 
 
   // --- LOGIC BLOCK 2: APPLY RULES (Safety Overrides) ---
-  // These rules run AFTER Alexa/Manual inputs and will override them.
-  // This ensures the motor CANNOT run when full and MUST run when empty.
   if (level == "0%") {
     motorON = true; // Auto-ON (safety fill)
   }
@@ -248,10 +278,6 @@ void loop() {
   }
 
   // --- LOGIC BLOCK 3: ACT ON FINAL STATE ---
-  // This single block checks the final 'motorON' state and updates
-  // the relay, timer, and LCD.
-
-  // 1. Check for state transition (to update motor ON time)
   if (motorON && !lastMotorState) {
     motorTime = millis(); // Motor just turned ON
     Serial.println("Motor state changed to ON.");
