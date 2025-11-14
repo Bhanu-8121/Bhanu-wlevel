@@ -10,17 +10,24 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-    - name: Install PlatformIO
-      run: pip install platformio
+      - name: Install PlatformIO
+        run: pip install platformio
 
-    - name: Build firmware
-      run: platformio run
+      - name: Build firmware
+        run: platformio run
 
-    - name: Upload firmware
-      uses: actions/upload-artifact@v3
-      with:
-        name: firmware
-        path: .pio/build/nodemcuv2/firmware.bin
+      - name: Find firmware .bin file
+        id: find_firmware
+        run: |
+          BIN_FILE=$(find .pio/build -name "*.bin" | head -n 1)
+          echo "Firmware file: $BIN_FILE"
+          echo "BIN_PATH=$BIN_FILE" >> $GITHUB_ENV
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: ${{ env.BIN_PATH }}
