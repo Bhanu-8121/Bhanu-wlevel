@@ -21,7 +21,7 @@ const char* ssid = "KBC Hotspot";
 const char* password = "fpMD@143";
 
 WiFiUDP ntpUDP;
-// Update interval set to 60000ms (60 seconds)
+// Update interval 60000ms (1 min). The library handles this automatically.
 NTPClient timeClient(ntpUDP, "pool.ntp.org", 19800, 60000);  // IST (+05:30)
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);
@@ -36,11 +36,6 @@ const int sensor2 = 12;  // D6
 const int sensor3 = 13;  // D7
 const int sensor4 = 4;   // D2
 const int relayPin = 16; // D0
-
-// --- NEW --- Manual Switch Pin
-// D4 (GPIO2) is used for the onboard LED.
-// !!! WARNING: This pin MUST be HIGH at boot. !!!
-// Do NOT hold the manual switch down when powering on the ESP.
 const int manualPin = 2; // D4
 
 // WiFi state
@@ -54,46 +49,46 @@ bool blinkState = false;
 
 // --- "Single Source of Truth" for motor state ---
 bool motorON = false;
-bool lastMotorState = false; // For detecting changes
+bool lastMotorState = false; 
 unsigned long motorTime = 0;
 
-// --- NEW --- Manual Switch Debounce
+// --- Manual Switch Debounce ---
 bool lastSwitchState = HIGH;
 unsigned long lastSwitchTime = 0;
 const unsigned long debounceDelay = 50;
 
-// Local RTC
-bool timeSynced = false;
-unsigned long lastSyncMillis = 0;
+// --- "Soft-RTC" Time ---
+// This is the master switch. Once true, it stays true.
+bool timeSynced = false; 
+// The system time (in seconds) at the last *successful* sync
 unsigned long offsetSeconds = 0;
-unsigned long lastNtpResync = 0;
+// The millis() value at the last *successful* sync
+unsigned long lastSyncMillis = 0;
+
 
 // ===== WEB OTA SETUP =====
 void setupWebOTA() {
-  // Username = "kbc"
-  // Password = "987654321"
   httpUpdater.setup(&server, "/update", "kbc", "987654321");  
   server.begin();
   Serial.println("WEB OTA Ready!");
   Serial.println("Go to: http://<ESP-IP>/update");
 }
 
-// ===== NEW --- ALEXA CALLBACK =====
+// ===== ALEXA CALLBACK =====
 void relayChanged(uint8_t brightness) {
   Serial.print("Alexa command received: ");
   if (brightness > 0) {
     Serial.println("ON");
-    motorON = true; // Set the master variable
+    motorON = true; 
   } else {
     Serial.println("OFF");
-    motorON = false; // Set the master variable
+    motorON = false; 
   }
 }
 
-
 void setup() {
   Serial.begin(115200);
-  Serial.println("\n\nBooting Water Level Controller...");
+  Serial.println("\n\nBooting Water Level Controller v3...");
   Serial.println("!!! WARNING: Do not hold D4/GPIO2 switch during boot. !!!");
 
   pinMode(sensor1, INPUT_PULLUP);
@@ -101,13 +96,13 @@ void setup() {
   pinMode(sensor3, INPUT_PULLUP);
   pinMode(sensor4, INPUT_PULLUP);
   pinMode(relayPin, OUTPUT);
-  pinMode(manualPin, INPUT_PULLUP); // NEW
+  pinMode(manualPin, INPUT_PULLUP);
   
   digitalWrite(relayPin, LOW); // Motor OFF by default
   lastMotorState = false;
-  lastSwitchState = digitalRead(manualPin); // Init debounce logic
+  lastSwitchState = digitalRead(manualPin); 
 
-  Wire.begin(0, 5); // Using D3 (GPIO0) and D1 (GPIO5) for I2C
+  Wire.begin(0, 5); // D3 (GPIO0) and D1 (GPIO5) for I2C
   lcd.init(); lcd.backlight();
   lcd.createChar(0, wifiOn);
   lcd.createChar(1, wifiOff);
@@ -119,12 +114,10 @@ void setup() {
   lcd.setCursor(0,0); lcd.print("Water Level:");
   lcd.setCursor(0,1); lcd.print("Motor:OFF ");
   lcd.setCursor(10,1); lcd.write(0);
-  lcd.setCursor(11,1); lcd.print("--:--");
+  lcd.setCursor(11,1); lcd.print("--:--"); // Req 1: Initial state
 
   WiFi.begin(ssid, password);
   wifiStartTime = millis();
-
-  // ---- START WEB OTA ----
   setupWebOTA();
 }
 
@@ -132,99 +125,99 @@ void loop() {
   // --- Core Services ---
   server.handleClient();   // Handle HTTP requests for OTA
   
-  if (wifiOK) {
-    espalexa.loop();       // Handle Alexa requests
-    
-    // --- TIME FIX ---
-    // Periodically call update() to re-sync time.
-    // The NTPClient library is smart and will only fetch
-    // from the server based on the 60-second interval.
-    timeClient.update();
-  }
-
-  // --- WiFi Connection Management (non-blocking) ---
   bool isConnected = (WiFi.status() == WL_CONNECTED);
+  bool ntpSuccess = false; // Flag to see if we got an NTP update *this loop*
 
-  if (firstAttempt && !isConnected && (millis() - wifiStartTime >= wifiTimeout)) {
-    firstAttempt = false;
-    lcd.setCursor(0,1); lcd.print("WiFi Failed     ");
-    delay(1000);
-    lcd.setCursor(0,1); lcd.print("Motor:OFF       ");
-    lcd.setCursor(10,1); lcd.write(1);
-  }
+  // --- Runs continuously if WiFi is connected ---
+  if (isConnected) {
+    if (!wifiOK) {
+      // --- Runs ONCE on (re)connect ---
+      wifiOK = true;
+      firstAttempt = false;
+      timeClient.begin(); // Start the NTP client
+      espalexa.addDevice("Motor", relayChanged);
+      espalexa.begin();
+      Serial.println("WiFi Connected. Espalexa Started.");
 
-  if (isConnected && !wifiOK) {
-    // --- Runs ONCE on WiFi connection ---
-    wifiOK = true;
-    firstAttempt = false;
-    
-    // 1. Sync Time
-    timeClient.begin();
-    Serial.print("Syncing time... ");
-
-    // --- TIME FIX ---
-    // Use forceUpdate() to wait for a valid time reply.
-    // This prevents the "5:30" bug.
-    if (timeClient.forceUpdate()) {
-        Serial.println("Success.");
-        timeSynced = true;
-        lastSyncMillis = millis(); // Store the *real* time of this sync
-        lastNtpResync = millis();
-        // Get the *actual* current time
-        offsetSeconds = timeClient.getHours()*3600 + timeClient.getMinutes()*60 + timeClient.getSeconds();
-        Serial.printf("Time set to: %s\n", timeClient.getFormattedTime().c_str());
-    } else {
-        Serial.println("Failed.");
-        timeSynced = false; // Don't try to use the soft-RTC
+      lcd.setCursor(0,1); lcd.print("WiFi Connected  ");
+      delay(1000);
+      lcd.setCursor(0,1); lcd.print("                ");
+      Serial.print("IP: "); Serial.println(WiFi.localIP());
     }
 
-    // 2. Start Alexa
-    espalexa.addDevice("Motor", relayChanged);
-    espalexa.begin();
-    Serial.println("Espalexa Started.");
-
-    lcd.setCursor(0,1); lcd.print("WiFi Connected  ");
-    delay(1000);
-    lcd.setCursor(0,1); lcd.print("                ");
-
-    Serial.print("IP: "); Serial.println(WiFi.localIP());
+    // --- Continuous WiFi tasks ---
+    espalexa.loop();
+    
+    // timeClient.update() is smart. It only fetches new time
+    // based on the 60-second interval we set.
+    // It returns 'true' on a successful fetch.
+    ntpSuccess = timeClient.update(); 
   }
 
-  if (!isConnected && wifiOK) {
-    // --- Runs ONCE on WiFi disconnect ---
-    wifiOK = false;
-    timeSynced = false;
-    Serial.println("WiFi Disconnected.");
-    lcd.setCursor(0,1); lcd.print("WiFi Disconnect ");
-    delay(1000);
-    lcd.setCursor(0,1); lcd.print("Motor:OFF       ");
-    lcd.setCursor(10,1); lcd.write(1);
+  // --- Runs continuously if WiFi is NOT connected ---
+  if (!isConnected) {
+    if (wifiOK) {
+      // --- Runs ONCE on disconnect ---
+      wifiOK = false;
+      Serial.println("WiFi Disconnected. Soft-RTC is running.");
+      // !!! We DO NOT set timeSynced = false !!!
+      // This is the fix for Req 3.
+      
+      lcd.setCursor(0,1); lcd.print("WiFi Disconnect ");
+      delay(1000);
+      // Display logic will take over from here
+    }
+    
+    // Handle "WiFi Failed" message on first attempt timeout
+    if (firstAttempt && (millis() - wifiStartTime >= wifiTimeout)) {
+      firstAttempt = false;
+      lcd.setCursor(0,1); lcd.print("WiFi Failed     ");
+      delay(1000);
+    }
   }
 
-  // --- Time Update ---
+
+  // --- "SOFT-RTC" (Always Runs) ---
   String currentTime = "--:--";
+
+  // Req 2 & 3: This logic runs *if* we have successfully synced *at least once*
   if (timeSynced) {
     
-    // --- TIME FIX ---
-    // The timeClient.update() runs in the background.
-    // Let's re-read the "base" time from it every 10 minutes
-    // to prevent our soft-RTC from drifting.
-    if (millis() - lastNtpResync > 600000) { // 10 minutes
-        lastNtpResync = millis();
-        lastSyncMillis = millis();
-        offsetSeconds = timeClient.getHours()*3600 + timeClient.getMinutes()*60 + timeClient.getSeconds();
-        Serial.println("NTP soft-RTC re-synced.");
-    }
+    // Calculate the time based on internal clock
+    unsigned long elapsed = (millis() - lastSyncMillis) / 1000;
+    unsigned long totalSeconds = offsetSeconds + elapsed;
 
-    unsigned long elapsed = (millis() - lastSyncMillis)/1000;
-    unsigned long total = offsetSeconds + elapsed;
-    int h = (total/3600) % 24;
-    int m = (total/60) % 60;
+    // This is the "live" part
+    // If we just got a *new* update from the NTP server,
+    // re-align our soft-RTC to be more accurate.
+    if (ntpSuccess) {
+      Serial.println("NTP re-sync! Re-aligning soft-RTC.");
+      totalSeconds = timeClient.getHours()*3600 + timeClient.getMinutes()*60 + timeClient.getSeconds();
+      
+      // Store the new base values
+      offsetSeconds = totalSeconds;
+      lastSyncMillis = millis();
+    }
+    
+    // Format the time for display
+    int h = (totalSeconds / 3600) % 24;
+    int m = (totalSeconds / 60) % 60;
     char buf[6];
     sprintf(buf, "%02d:%02d", h, m);
     currentTime = String(buf);
   }
-
+  else if (ntpSuccess) {
+    // This runs only ONCE, on the very first successful sync
+    Serial.println("--- INITIAL TIME SYNC ---");
+    timeSynced = true; // This is the master switch
+    
+    // Store the base values for our soft-RTC
+    offsetSeconds = timeClient.getHours()*3600 + timeClient.getMinutes()*60 + timeClient.getSeconds();
+    lastSyncMillis = millis();
+    
+    Serial.printf("Time set to: %s\n", timeClient.getFormattedTime().c_str());
+  }
+  
   // --- LOGIC BLOCK 1: GATHER INPUTS ---
 
   // 1a. Manual Switch (non-blocking debounce)
@@ -234,18 +227,14 @@ void loop() {
   }
 
   if ((millis() - lastSwitchTime) > debounceDelay) {
-    // State is stable
     if (currentSwitchState == LOW && lastSwitchState == HIGH) {
-      // Button was just pressed
       Serial.println("Manual switch pressed. Toggling motor.");
-      motorON = !motorON; // Toggle the master variable
+      motorON = !motorON; 
     }
   }
   lastSwitchState = currentSwitchState;
   
-  // 1b. Alexa commands (handled by espalexa.loop() at top)
-
-  // 1c. Water Level Sensors
+  // 1b. Water Level Sensors
   bool s1=false,s2=false,s3=false,s4=false;
   int s4c=0;
   for(int i=0;i<7;i++){
@@ -264,38 +253,35 @@ void loop() {
   else if (s1) level="25%";
   else level="0%";
 
-  // Update level on LCD
   lcd.setCursor(12,0); lcd.print("    "); 
   lcd.setCursor(12,0); lcd.print(level);
 
 
   // --- LOGIC BLOCK 2: APPLY RULES (Safety Overrides) ---
   if (level == "0%") {
-    motorON = true; // Auto-ON (safety fill)
+    motorON = true; 
   }
   if (level == "100%") {
-    motorON = false; // Auto-OFF (safety shutoff)
+    motorON = false;
   }
 
   // --- LOGIC BLOCK 3: ACT ON FINAL STATE ---
   if (motorON && !lastMotorState) {
-    motorTime = millis(); // Motor just turned ON
+    motorTime = millis(); 
     Serial.println("Motor state changed to ON.");
   }
   if (!motorON && lastMotorState) {
     Serial.println("Motor state changed to OFF.");
   }
-  lastMotorState = motorON; // Save state for next loop
+  lastMotorState = motorON; 
 
-  // 2. Set physical relay
   digitalWrite(relayPin, motorON ? HIGH : LOW);
 
-  // 3. Update LCD Display (Row 1)
+  // --- LCD Display (Row 1) ---
   lcd.setCursor(0,1);
   if (motorON) {
-    // Motor is ON
     int mins = (millis() - motorTime) / 60000;
-    char buf[17]; // 16 chars + null terminator
+    char buf[17]; 
     sprintf(buf, "Motor:ON frm %02dM", mins);
     lcd.print(buf);
   } else {
@@ -318,6 +304,7 @@ void loop() {
       lcd.write(1); // WiFi OFF/Failed symbol
     }
 
+    // This now prints either "--:--" or the live time
     lcd.setCursor(11,1); 
     lcd.print(currentTime);
   }
