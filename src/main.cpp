@@ -8,10 +8,15 @@
 #include <ESP8266WebServer.h>
 #include <ESP8266HTTPUpdateServer.h>
 
+// ===== ALEXA =====
+#include <Espalexa.h>
+
 ESP8266WebServer server(80);
 ESP8266HTTPUpdateServer httpUpdater;
+Espalexa espalexa;
 
 // ===== WIFI =====
+// !!! UPDATE YOUR WIFI CREDENTIALS HERE !!!
 const char* ssid = "test";
 const char* password = "123456789";
 
@@ -29,8 +34,13 @@ const int sensor1 = 14;  // D5
 const int sensor2 = 12;  // D6
 const int sensor3 = 13;  // D7
 const int sensor4 = 4;   // D2
-
 const int relayPin = 16; // D0
+
+// --- NEW --- Manual Switch Pin
+// D4 (GPIO2) is used for the onboard LED.
+// !!! WARNING: This pin MUST be HIGH at boot. !!!
+// Do NOT hold the manual switch down when powering on the ESP.
+const int manualPin = 2; // D4
 
 // WiFi state
 bool wifiOK = false;
@@ -41,15 +51,22 @@ const unsigned long wifiTimeout = 30000;
 unsigned long blinkTime = 0;
 bool blinkState = false;
 
+// --- "Single Source of Truth" for motor state ---
 bool motorON = false;
+bool lastMotorState = false; // For detecting changes
 unsigned long motorTime = 0;
+
+// --- NEW --- Manual Switch Debounce
+bool lastSwitchState = HIGH;
+unsigned long lastSwitchTime = 0;
+const unsigned long debounceDelay = 50;
 
 // Local RTC
 bool timeSynced = false;
 unsigned long lastSyncMillis = 0;
 unsigned long offsetSeconds = 0;
 
-// ===== WEB OTA SETUP (iPhone-compatible) =====
+// ===== WEB OTA SETUP =====
 void setupWebOTA() {
   // Username = "kbc"
   // Password = "987654321"
@@ -59,17 +76,38 @@ void setupWebOTA() {
   Serial.println("Go to: http://<ESP-IP>/update");
 }
 
+// ===== NEW --- ALEXA CALLBACK =====
+// This function is called when Alexa changes the "Motor" state
+void relayChanged(uint8_t brightness) {
+  Serial.print("Alexa command received: ");
+  if (brightness > 0) {
+    Serial.println("ON");
+    motorON = true; // Set the master variable
+  } else {
+    Serial.println("OFF");
+    motorON = false; // Set the master variable
+  }
+  // The main loop will handle sensor overrides and update the relay/LCD
+}
+
+
 void setup() {
   Serial.begin(115200);
+  Serial.println("\n\nBooting Water Level Controller...");
+  Serial.println("!!! WARNING: Do not hold D4/GPIO2 switch during boot. !!!");
 
   pinMode(sensor1, INPUT_PULLUP);
   pinMode(sensor2, INPUT_PULLUP);
   pinMode(sensor3, INPUT_PULLUP);
   pinMode(sensor4, INPUT_PULLUP);
   pinMode(relayPin, OUTPUT);
-  digitalWrite(relayPin, LOW);
+  pinMode(manualPin, INPUT_PULLUP); // NEW
+  
+  digitalWrite(relayPin, LOW); // Motor OFF by default
+  lastMotorState = false;
+  lastSwitchState = digitalRead(manualPin); // Init debounce logic
 
-  Wire.begin(0, 5);
+  Wire.begin(0, 5); // Using D3 (GPIO0) and D1 (GPIO5) for I2C
   lcd.init(); lcd.backlight();
   lcd.createChar(0, wifiOn);
   lcd.createChar(1, wifiOff);
@@ -91,29 +129,15 @@ void setup() {
 }
 
 void loop() {
-  server.handleClient();   // <==== IMPORTANT FOR WEB OTA
+  // --- Core Services ---
+  server.handleClient();   // Handle HTTP requests for OTA
+  if (wifiOK) {
+    espalexa.loop();       // Handle Alexa requests
+  }
 
+  // --- WiFi Connection Management (non-blocking) ---
   bool isConnected = (WiFi.status() == WL_CONNECTED);
 
-  // ==================== FIX START ====================
-  // This block was redundant and caused the display bug.
-  // It was writing to (10,1) even when the motor was ON.
-  // The correct logic is already in the "else { // Motor:OFF }"
-  // block at the end of the loop.
-  /*
-  if (firstAttempt && !isConnected && (millis() - wifiStartTime < wifiTimeout)) {
-    if (millis() - blinkTime > 500) {
-      blinkState = !blinkState;
-      blinkTime = millis();
-      lcd.setCursor(10,1);
-      lcd.write(blinkState ? 0 : ' ');
-    }
-  }
-  */
-  // ===================== FIX END =====================
-  
-  // This block handles the "WiFi Failed" message *after* timeout
-  // This is fine and does not conflict.
   if (firstAttempt && !isConnected && (millis() - wifiStartTime >= wifiTimeout)) {
     firstAttempt = false;
     lcd.setCursor(0,1); lcd.print("WiFi Failed     ");
@@ -122,34 +146,42 @@ void loop() {
     lcd.setCursor(10,1); lcd.write(1);
   }
 
-  // This handles the "WiFi Connected" message. Fine.
   if (isConnected && !wifiOK) {
+    // --- Runs ONCE on WiFi connection ---
     wifiOK = true;
     firstAttempt = false;
+    
+    // 1. Sync Time
     timeClient.begin();
     timeClient.update();
     timeSynced = true;
     lastSyncMillis = millis();
     offsetSeconds = timeClient.getHours()*3600 + timeClient.getMinutes()*60 + timeClient.getSeconds();
 
+    // 2. Start Alexa
+    espalexa.addDevice("Motor", relayChanged);
+    espalexa.begin();
+    Serial.println("WiFi Connected. Espalexa Started.");
+
     lcd.setCursor(0,1); lcd.print("WiFi Connected  ");
     delay(1000);
     lcd.setCursor(0,1); lcd.print("                ");
 
-    Serial.print("IP: ");
-    Serial.println(WiFi.localIP());
+    Serial.print("IP: "); Serial.println(WiFi.localIP());
   }
 
-  // This handles the "WiFi Disconnect" message. Fine.
   if (!isConnected && wifiOK) {
+    // --- Runs ONCE on WiFi disconnect ---
     wifiOK = false;
+    timeSynced = false;
+    Serial.println("WiFi Disconnected.");
     lcd.setCursor(0,1); lcd.print("WiFi Disconnect ");
     delay(1000);
     lcd.setCursor(0,1); lcd.print("Motor:OFF       ");
     lcd.setCursor(10,1); lcd.write(1);
   }
 
-  // --- Time Logic ---
+  // --- Time Update ---
   String currentTime = "--:--";
   if (timeSynced) {
     unsigned long elapsed = (millis() - lastSyncMillis)/1000;
@@ -161,7 +193,27 @@ void loop() {
     currentTime = String(buf);
   }
 
-  // --- Sensor Logic ---
+  // --- LOGIC BLOCK 1: GATHER INPUTS ---
+
+  // 1a. Manual Switch (non-blocking debounce)
+  bool currentSwitchState = digitalRead(manualPin);
+  if (currentSwitchState != lastSwitchState) {
+    lastSwitchTime = millis(); // Reset debounce timer
+  }
+
+  if ((millis() - lastSwitchTime) > debounceDelay) {
+    // State is stable
+    if (currentSwitchState == LOW && lastSwitchState == HIGH) {
+      // Button was just pressed
+      Serial.println("Manual switch pressed. Toggling motor.");
+      motorON = !motorON; // Toggle the master variable
+    }
+  }
+  lastSwitchState = currentSwitchState;
+  
+  // 1b. Alexa commands (handled by espalexa.loop() at top)
+
+  // 1c. Water Level Sensors
   bool s1=false,s2=false,s3=false,s4=false;
   int s4c=0;
   for(int i=0;i<7;i++){
@@ -173,7 +225,6 @@ void loop() {
   }
   s4 = (s4c>=5);
 
-  // --- Level Logic ---
   String level;
   if (s4&&s3&&s2&&s1) level="100%";
   else if (s3&&s2&&s1) level="75%";
@@ -181,28 +232,48 @@ void loop() {
   else if (s1) level="25%";
   else level="0%";
 
+  // Update level on LCD
   lcd.setCursor(12,0); lcd.print("    "); 
   lcd.setCursor(12,0); lcd.print(level);
 
-  // --- Motor Control Logic ---
-  if (level=="0%" && !motorON){
-    motorON=true; digitalWrite(relayPin,HIGH); motorTime=millis();
+
+  // --- LOGIC BLOCK 2: APPLY RULES (Safety Overrides) ---
+  // These rules run AFTER Alexa/Manual inputs and will override them.
+  // This ensures the motor CANNOT run when full and MUST run when empty.
+  if (level == "0%") {
+    motorON = true; // Auto-ON (safety fill)
   }
-  if (level=="100%" && motorON){
-    motorON=false; digitalWrite(relayPin,LOW);
+  if (level == "100%") {
+    motorON = false; // Auto-OFF (safety shutoff)
   }
 
-  // --- Main Display Logic (Row 1) ---
-  // This is now the *only* place that controls Row 1,
-  // which prevents any conflicts.
-  lcd.setCursor(0,1);
-  if (motorON){
-    int mins=(millis()-motorTime)/60000;
-    char buf[17]; // Increased buffer to 17 for 16 chars + null
-    sprintf(buf,"Motor:ON frm %02dM",mins);
-    lcd.print(buf);
+  // --- LOGIC BLOCK 3: ACT ON FINAL STATE ---
+  // This single block checks the final 'motorON' state and updates
+  // the relay, timer, and LCD.
+
+  // 1. Check for state transition (to update motor ON time)
+  if (motorON && !lastMotorState) {
+    motorTime = millis(); // Motor just turned ON
+    Serial.println("Motor state changed to ON.");
   }
-  else{
+  if (!motorON && lastMotorState) {
+    Serial.println("Motor state changed to OFF.");
+  }
+  lastMotorState = motorON; // Save state for next loop
+
+  // 2. Set physical relay
+  digitalWrite(relayPin, motorON ? HIGH : LOW);
+
+  // 3. Update LCD Display (Row 1)
+  lcd.setCursor(0,1);
+  if (motorON) {
+    // Motor is ON
+    int mins = (millis() - motorTime) / 60000;
+    char buf[17]; // 16 chars + null terminator
+    sprintf(buf, "Motor:ON frm %02dM", mins);
+    lcd.print(buf);
+  } else {
+    // Motor is OFF
     lcd.print("Motor:OFF ");
     lcd.setCursor(10,1);
 
@@ -210,7 +281,7 @@ void loop() {
       lcd.write(0); // WiFi ON symbol
     }
     else if (firstAttempt){
-      // This is the correct place for the blinking logic
+      // Blinking symbol while connecting
       if (millis() - blinkTime > 500) {
         blinkState = !blinkState;
         blinkTime = millis();
@@ -218,7 +289,7 @@ void loop() {
       lcd.write(blinkState ? 0 : ' ');
     }
     else {
-      lcd.write(1); // WiFi OFF symbol
+      lcd.write(1); // WiFi OFF/Failed symbol
     }
 
     lcd.setCursor(11,1); 
