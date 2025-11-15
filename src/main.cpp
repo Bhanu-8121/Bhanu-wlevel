@@ -7,7 +7,6 @@
   - Non-blocking improvements from previous iteration
   - Compatible with recent fauxmoESP (uses 4-arg callback)
 */
-
 #include <Arduino.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
