@@ -1,16 +1,8 @@
-/*
-  K.B.C Water Level Controller
-  - WebOTA enabled (username: kbc, password: 987654321)
-  - Alexa Wemo (fauxmoESP) device named "Motor"
-  - Keeps all pin assignments unchanged (LCD, sensors, relay, manual)
-  - Soft-RTC via NTPClient
-  - Non-blocking improvements from previous iteration
-  - Compatible with recent fauxmoESP (uses 4-arg callback)
-*/
 #include <Arduino.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <ESP8266WiFi.h>
+#include <WiFiManager.h>  // WiFiManager Mode 3 Try WiFi first → only open AP if connection really fails.
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 
@@ -21,25 +13,17 @@
 // ===== ALEXA WEMO =====
 #include <fauxmoESP.h>
 
+// ===== OBJECTS =====
 ESP8266WebServer server(80);
 ESP8266HTTPUpdateServer httpUpdater;
 fauxmoESP fauxmo;
 
-// ===== WIFI =====
-const char* ssid = "KBC Hotspot";
-const char* password = "fpMD@143";
-
 WiFiUDP ntpUDP;
-// 60s update interval, IST offset (19800 seconds)
-NTPClient timeClient(ntpUDP, "pool.ntp.org", 19800, 60000);
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 19800, 60000); // IST
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-// WiFi Symbols
-byte wifiOn[8]  = {B00000,B01110,B10001,B00100,B01010,B00000,B00100,B00000};
-byte wifiOff[8] = {B10001,B11111,B11011,B00100,B01010,B10001,B10101,B00000};
-
-// Pins (unchanged)
+// ===== GPIO PINS =====
 const int sensor1 = 14;  // D5
 const int sensor2 = 12;  // D6
 const int sensor3 = 13;  // D7
@@ -47,51 +31,54 @@ const int sensor4 = 4;   // D2
 const int relayPin = 16; // D0
 const int manualPin = 2; // D4
 
-// WiFi state
+// ===== STATE =====
 bool wifiOK = false;
-bool firstAttempt = true;
-unsigned long wifiStartTime = 0;
-const unsigned long wifiTimeout = 30000;
-
-unsigned long blinkTime = 0;
-bool blinkState = false;
-
-// Motor state
 bool motorON = false;
 bool lastMotorState = false;
+
 unsigned long motorTime = 0;
 
-// Manual switch debounce
-bool lastSwitchState = HIGH;
-unsigned long lastSwitchTime = 0;
-const unsigned long debounceDelay = 50;
+// ===== WiFi Manager function (Mode 3) =====
+void startWiFiManager() {
 
-// Soft-RTC
-bool timeSynced = false;
-unsigned long offsetSeconds = 0;
-unsigned long lastSyncMillis = 0;
+  WiFiManager wm;
 
-// WebOTA setup (username + password for iPhone)
+  wm.setTimeout(15);                  // Try saved WiFi for 15 sec
+  bool ok = wm.autoConnect("KBC-Setup");
+
+  if (!ok) {
+    Serial.println("❌ WiFi failed → Starting AP Mode");
+  } else {
+    Serial.println("✅ WiFi Connected");
+  }
+}
+
+// ===== Web OTA =====
 void setupWebOTA() {
   httpUpdater.setup(&server, "/update", "kbc", "987654321");
   server.begin();
-  Serial.println("WEB OTA Ready!");
-  Serial.println("Go to: http://<ESP-IP>/update");
+  Serial.println("WebOTA Ready → http://DEVICE-IP/update");
 }
 
-// Fauxmo callback signature required by newer fauxmoESP:
-// void callback(unsigned char device_id, const char * device_name, bool state, unsigned char value)
-void wemoCallback(unsigned char device_id, const char * device_name, bool state, unsigned char value) {
-  Serial.printf("Fauxmo callback: device '%s' id=%u -> %s (value=%u)\n",
-                device_name, (unsigned)device_id, state ? "ON" : "OFF", (unsigned)value);
+// ===== Alexa Callback =====
+void wemoCallback(unsigned char device_id,
+                  const char * device_name,
+                  bool state,
+                  unsigned char value) {
+
+  Serial.printf("Alexa → %s = %s\n",
+                device_name,
+                state ? "ON" : "OFF");
+
   motorON = state;
 }
 
+// ===== SETUP =====
 void setup() {
   Serial.begin(115200);
-  Serial.println("\nBooting KBC Water Level Controller (Wemo + WebOTA)...");
+  delay(500);
+  Serial.println("\nBooting KBC Controller…");
 
-  // pins
   pinMode(sensor1, INPUT_PULLUP);
   pinMode(sensor2, INPUT_PULLUP);
   pinMode(sensor3, INPUT_PULLUP);
@@ -100,134 +87,65 @@ void setup() {
   pinMode(manualPin, INPUT_PULLUP);
 
   digitalWrite(relayPin, LOW);
-  lastMotorState = false;
-  lastSwitchState = digitalRead(manualPin);
 
-  // Keep I2C pins unchanged as requested
+  // LCD
   Wire.begin(0, 5);
   lcd.init();
   lcd.backlight();
-  lcd.createChar(0, wifiOn);
-  lcd.createChar(1, wifiOff);
-
-  lcd.setCursor(6,0); lcd.print("K.B.C");
-  lcd.setCursor(0,1); lcd.print("Home Automation");
-  delay(2000);
+  lcd.setCursor(0,0); lcd.print("KBC Controller");
+  lcd.setCursor(0,1); lcd.print("Starting…");
+  delay(1500);
   lcd.clear();
 
-  lcd.setCursor(0,0); lcd.print("Water Level:");
-  lcd.setCursor(0,1); lcd.print("Motor:OFF ");
-  lcd.setCursor(10,1); lcd.write(0);
-  lcd.setCursor(11,1); lcd.print("--:--");
+  // WiFiManager (Mode 3)
+  startWiFiManager();
 
-  // start WiFi (station)
-  WiFi.begin(ssid, password);
-  wifiStartTime = millis();
+  // Start NTP
+  timeClient.begin();
 
-  // start WebOTA
+  // Web OTA
   setupWebOTA();
 
-  // fauxmo Wemo setup
-  fauxmo.createServer(true);   // create internal web server for discovery
-  fauxmo.setPort(1901);          // required port for Alexa discovery
-  fauxmo.addDevice("Motor");   // Alexa device name as requested
-  fauxmo.onSetState(wemoCallback);
+  // Alexa Wemo
+  fauxmo.createServer(true);
+  fauxmo.setPort(80);
   fauxmo.enable(true);
+  fauxmo.addDevice("Motor");
+  fauxmo.onSetState(wemoCallback);
 }
 
+// ===== LOOP =====
 void loop() {
-  server.handleClient();   // WebOTA
-  fauxmo.handle();         // Alexa handling (discovery + commands)
+  server.handleClient();
+  fauxmo.handle();
 
-  bool isConnected = (WiFi.status() == WL_CONNECTED);
-  bool ntpSuccess = false;
+  bool isConnected = WiFi.status() == WL_CONNECTED;
 
-  // WiFi connected actions
+  if (isConnected && !wifiOK) {
+    wifiOK = true;
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+  }
+
   if (isConnected) {
-    if (!wifiOK) {
-      wifiOK = true;
-      firstAttempt = false;
-      timeClient.begin();
-      Serial.println("WiFi Connected. NTP client started.");
-
-      lcd.setCursor(0,1); lcd.print("WiFi Connected  ");
-      delay(600);
-      lcd.setCursor(0,1); lcd.print("                ");
-
-      Serial.print("IP: "); Serial.println(WiFi.localIP());
-    }
-
-    // update NTP (returns true only when a fresh time fetch occurred)
-    ntpSuccess = timeClient.update();
+    timeClient.update();
   }
 
-  // WiFi disconnected actions
-  if (!isConnected) {
-    if (wifiOK) {
-      wifiOK = false;
-      Serial.println("WiFi Disconnected. Soft-RTC will run.");
-      lcd.setCursor(0,1); lcd.print("WiFi Disconnect ");
-      delay(600);
-    }
-
-    if (firstAttempt && (millis() - wifiStartTime >= wifiTimeout)) {
-      firstAttempt = false;
-      lcd.setCursor(0,1); lcd.print("WiFi Failed     ");
-      delay(600);
-    }
-  }
-
-  // Soft-RTC handling
-  String currentTime = "--:--";
-  if (timeSynced) {
-    unsigned long elapsed = (millis() - lastSyncMillis) / 1000;
-    unsigned long totalSeconds = offsetSeconds + elapsed;
-
-    if (ntpSuccess) {
-      Serial.println("NTP re-sync. Re-aligning soft-RTC.");
-      totalSeconds = timeClient.getHours() * 3600UL + timeClient.getMinutes() * 60UL + timeClient.getSeconds();
-      offsetSeconds = totalSeconds;
-      lastSyncMillis = millis();
-    }
-
-    int h = (totalSeconds / 3600) % 24;
-    int m = (totalSeconds / 60) % 60;
-    char buf[6];
-    sprintf(buf, "%02d:%02d", h, m);
-    currentTime = String(buf);
-  } else if (ntpSuccess) {
-    // first successful sync
-    Serial.println("--- INITIAL TIME SYNC ---");
-    timeSynced = true;
-    offsetSeconds = timeClient.getHours() * 3600UL + timeClient.getMinutes() * 60UL + timeClient.getSeconds();
-    lastSyncMillis = millis();
-    Serial.printf("Time set to: %s\n", timeClient.getFormattedTime().c_str());
-  }
-
-  // --------- Manual Switch (debounce non-blocking) ----------
-  bool currentSwitchState = digitalRead(manualPin);
-  if (currentSwitchState != lastSwitchState) {
-    lastSwitchTime = millis();
-  }
-  if ((millis() - lastSwitchTime) > debounceDelay) {
-    if (currentSwitchState == LOW && lastSwitchState == HIGH) {
-      Serial.println("Manual switch pressed. Toggling motor.");
+  // Manual Switch
+  if (digitalRead(manualPin) == LOW) {
+    delay(120);
+    if (digitalRead(manualPin) == LOW) {
       motorON = !motorON;
+      Serial.println("Manual Toggle");
+      delay(300);
     }
   }
-  lastSwitchState = currentSwitchState;
 
-  // --------- Water Level Sensors (quick reads, no delays) ----------
-  bool s1 = false, s2 = false, s3 = false, s4 = false;
-  int s4c = 0;
-  for (int i = 0; i < 7; ++i) {
-    if (digitalRead(sensor1) == LOW) s1 = true;
-    if (digitalRead(sensor2) == LOW) s2 = true;
-    if (digitalRead(sensor3) == LOW) s3 = true;
-    if (digitalRead(sensor4) == LOW) ++s4c;
-    // intentionally no delay to keep loop responsive
-  }
-  s4 = (s4c >= 5);
+  // Water Sensors
+  bool s1 = digitalRead(sensor1) == LOW;
+  bool s2 = digitalRead(sensor2) == LOW;
+  bool s3 = digitalRead(sensor3) == LOW;
+  bool s4 = digitalRead(sensor4) == LOW;
 
   String level;
   if (s4 && s3 && s2 && s1) level = "100%";
@@ -236,49 +154,37 @@ void loop() {
   else if (s1) level = "25%";
   else level = "0%";
 
-  lcd.setCursor(12,0); lcd.print("    ");
-  lcd.setCursor(12,0); lcd.print(level);
-
-  // Safety overrides
+  // Safety
   if (level == "0%") motorON = true;
   if (level == "100%") motorON = false;
 
-  // Apply motor state
+  // Motor relay
   if (motorON && !lastMotorState) {
     motorTime = millis();
-    Serial.println("Motor turned ON.");
+    Serial.println("Motor ON");
   }
   if (!motorON && lastMotorState) {
-    Serial.println("Motor turned OFF.");
+    Serial.println("Motor OFF");
   }
   lastMotorState = motorON;
-
   digitalWrite(relayPin, motorON ? HIGH : LOW);
 
-  // LCD status line
+  // LCD update
+  lcd.setCursor(0,0);
+  lcd.print("Level: ");
+  lcd.print(level);
+  lcd.print("   ");
+
   lcd.setCursor(0,1);
   if (motorON) {
     int mins = (millis() - motorTime) / 60000;
-    char buf[17];
-    sprintf(buf, "Motor:ON frm %02dM", mins);
-    lcd.print(buf);
+    lcd.print("Motor ON ");
+    lcd.print(mins);
+    lcd.print("m   ");
   } else {
-    lcd.print("Motor:OFF ");
-    lcd.setCursor(10,1);
-    if (wifiOK) lcd.write(0);
-    else if (firstAttempt) {
-      if (millis() - blinkTime > 500) {
-        blinkState = !blinkState;
-        blinkTime = millis();
-      }
-      lcd.write(blinkState ? 0 : ' ');
-    } else {
-      lcd.write(1);
-    }
-    lcd.setCursor(11,1);
-    lcd.print(currentTime);
+    lcd.print("Motor OFF ");
+    lcd.print(timeClient.getFormattedTime());
   }
 
-  // tiny delay to avoid busy-looping too hard
   delay(10);
 }
