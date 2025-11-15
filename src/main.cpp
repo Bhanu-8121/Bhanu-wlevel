@@ -129,7 +129,7 @@ void setup() {
 
   // fauxmo Wemo setup
   fauxmo.createServer(true);   // create internal web server for discovery
-  fauxmo.setPort(80);          // required port for Alexa discovery
+  fauxmo.setPort(1901);          // required port for Alexa discovery
   fauxmo.addDevice("Motor");   // Alexa device name as requested
   fauxmo.onSetState(wemoCallback);
   fauxmo.enable(true);
