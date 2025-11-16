@@ -1,8 +1,8 @@
-/* Final KBC Water Level Controller (Corrected)
-   - WiFi reconnect logic added
-   - AP mode shows actual water level
-   - fauxmo.enable(true) fix applied
-   - Water level + LCD formatting fixed
+/* Final KBC Water Level Controller (NTP reconnect fix)
+   - Added lastConnected detection and NTP resync on reconnect
+   - Reconnect retry interval set to 30s
+   - If user configures WiFi in AP mode and device connects, it persists and restarts
+   - All LCD positions and WiFi icon behavior unchanged
 */
 
 #include <Arduino.h>
@@ -50,6 +50,8 @@ unsigned long motorTime = 0;
 bool timeSynced = false;
 unsigned long rtcOffsetSeconds = 0;
 unsigned long rtcLastSyncMillis = 0;
+
+bool lastConnected = false; // <-- NEW: track last connection state
 
 const unsigned long TRY_SAVED_MS   = 15000UL;
 const unsigned long AP_TOTAL_MS    = 120000UL;
@@ -116,6 +118,7 @@ void handleSave() {
   String ssid = server.arg("ssid");
   String pwd  = server.arg("pwd");
 
+  // Persist credentials flag; WiFi.begin will attempt to connect
   WiFi.persistent(true);
   WiFi.begin(ssid.c_str(), pwd.c_str());
 
@@ -156,7 +159,7 @@ void stopCustomAP() {
 }
 
 // ----------------------------------------------------
-// Try saved WiFi (15 sec)
+// Try saved WiFi (15 sec) - now also initializes NTP on success
 // ----------------------------------------------------
 bool trySavedWifi() {
   WiFi.mode(WIFI_STA);
@@ -167,17 +170,34 @@ bool trySavedWifi() {
   while (millis() - start < TRY_SAVED_MS) {
     if (WiFi.status() == WL_CONNECTED) {
       wifiConnected = true;
+
+      // Initialize NTP on first connection attempt success
+      timeClient.begin();
+      if (timeClient.update()) {
+        timeSynced = true;
+        rtcOffsetSeconds =
+          (unsigned long)timeClient.getHours()*3600UL +
+          (unsigned long)timeClient.getMinutes()*60UL +
+          (unsigned long)timeClient.getSeconds();
+        rtcLastSyncMillis = millis();
+        Serial.println("Initial NTP sync OK");
+      } else {
+        Serial.println("Initial NTP update failed (will retry on reconnect)");
+      }
+
+      lastConnected = true;
       return true;
     }
     delay(200);
   }
 
   wifiConnected = false;
+  lastConnected = false;
   return false;
 }
 
 // ----------------------------------------------------
-// Soft RTC time
+// Soft RTC time retrieval
 // ----------------------------------------------------
 void getCurrentHHMM(char *out) {
   if (timeSynced && WiFi.status() == WL_CONNECTED) {
@@ -219,7 +239,7 @@ void setup() {
   lcd.setCursor(0,1); lcd.print("Home Automation");
   delay(1500);
 
-  // Try saved WiFi
+  // Try saved WiFi and initialize NTP if successful
   if (!trySavedWifi()) {
     startCustomAP();
   }
@@ -267,7 +287,7 @@ void loop() {
     lcd.setCursor(12,0);
     lcd.print(level);
 
-    // Blink WiFi icon
+    // Blink WiFi icon (0.5s) while in AP
     if (millis() - blinkTicker >= 500) {
       blinkTicker = millis();
       blinkState = !blinkState;
@@ -276,34 +296,100 @@ void loop() {
       else lcd.print(" ");
     }
 
-    // AP timeout
-    if (millis() - apStartMillis > AP_TOTAL_MS) {
+    // If user-submitted credentials resulted in connection, persist + restart
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("Connected after AP config - persisting & restarting...");
+      WiFi.persistent(true);
       stopCustomAP();
+      delay(300);
+      ESP.restart();
+      return;
     }
 
-    return; // stop normal processing
+    // AP timeout -> stop AP and continue offline
+    if (millis() - apStartMillis > AP_TOTAL_MS) {
+      stopCustomAP();
+      // show normal offline screen briefly
+      lcd.clear();
+      lcd.setCursor(0,0); lcd.print("Water Level:");
+      lcd.setCursor(12,0); lcd.print(level);
+      lcd.setCursor(0,1); lcd.print("Motor:OFF ");
+      lcd.setCursor(10,1); lcd.write((uint8_t)1);
+      lcd.setCursor(11,1); lcd.print("--:--");
+      delay(800);
+    }
+
+    return; // stop normal processing while AP active
   }
 
   // NORMAL MODE -------------------------------------------------
 
   bool isConnected = (WiFi.status() == WL_CONNECTED);
 
-  // Auto reconnect
+  // -------- Auto reconnect every 30 seconds ------------
+  static unsigned long lastReconnectTry = 0;
   if (!isConnected) {
-    static unsigned long lastTry = 0;
-    if (millis() - lastTry > 10000) {
-      lastTry = millis();
-      WiFi.begin();  // retry saved WiFi every 10 sec
+    if (millis() - lastReconnectTry >= 30000UL) {
+      lastReconnectTry = millis();
+      Serial.println("Attempting background reconnect to saved WiFi...");
+      WiFi.begin(); // retry saved credentials
     }
   }
 
-  // Motor control
+  // -------- Detect fresh reconnect and re-init NTP ----------
+  if (isConnected && !lastConnected) {
+    Serial.println("WiFi just reconnected -> re-init NTP");
+    timeClient.begin();
+    if (timeClient.update()) {
+      timeSynced = true;
+      rtcOffsetSeconds =
+        (unsigned long)timeClient.getHours()*3600UL +
+        (unsigned long)timeClient.getMinutes()*60UL +
+        (unsigned long)timeClient.getSeconds();
+      rtcLastSyncMillis = millis();
+      Serial.println("NTP sync successful on reconnect");
+    } else {
+      Serial.println("NTP update failed on reconnect (will try later)");
+    }
+    lastConnected = true;
+  }
+
+  if (!isConnected) lastConnected = false;
+
+  // If connected, keep NTP updated (timeClient manages interval)
+  if (isConnected) {
+    if (timeClient.update()) {
+      // update soft-RTC baseline when a fresh update happens
+      timeSynced = true;
+      rtcOffsetSeconds =
+        (unsigned long)timeClient.getHours()*3600UL +
+        (unsigned long)timeClient.getMinutes()*60UL +
+        (unsigned long)timeClient.getSeconds();
+      rtcLastSyncMillis = millis();
+    }
+  }
+
+  // Manual toggle (debounce simplistic)
+  static unsigned long lastPress = 0;
+  if (digitalRead(manualPin) == LOW) {
+    if (millis() - lastPress > 300) {
+      motorON = !motorON;
+      Serial.println("Manual toggle -> motorON = " + String(motorON));
+      if (motorON) motorTime = millis();
+      lastPress = millis();
+      delay(200);
+    }
+  }
+
+  // Motor control safety overrides
   if (level == "0%") motorON = true;
   if (level == "100%") motorON = false;
 
+  if (motorON && !lastMotorState) motorTime = millis();
+  lastMotorState = motorON;
   digitalWrite(relayPin, motorON ? HIGH : LOW);
 
-  // LCD Update
+  // LCD line 1: Water Level
   lcd.setCursor(0,0);
   lcd.print("Water Level:");
   lcd.setCursor(12,0);
@@ -311,6 +397,7 @@ void loop() {
   lcd.setCursor(12,0);
   lcd.print(level);
 
+  // LCD line 2
   lcd.setCursor(0,1);
   if (motorON) {
     int mins = (millis() - motorTime) / 60000;
@@ -325,6 +412,7 @@ void loop() {
     lcd.print(hhmm);
   }
 
+  // WiFi icon at col10
   lcdShowWifi(isConnected);
 
   delay(200);
