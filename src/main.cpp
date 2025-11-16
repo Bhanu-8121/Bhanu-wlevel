@@ -1,11 +1,10 @@
-/* Final KBC Water Level Controller
-   - WiFi behavior & LCD exactly per spec
-   - WiFi bytes and positions as provided
-   - Non-blocking AP config page (POST /save)
-   - New credentials saved persistently on success, then ESP.restart()
-   - Soft-RTC HH:MM shown only when motor OFF (cols 11..15)
-   - WiFi icon at line2 col10 (lcd.setCursor(10,1))
-   - Water level on line1
+/* Final corrected KBC Water Level Controller
+   - Option 1 behavior after AP timeout (normal screen with wifiOff)
+   - Fixed compile errors: removed removeHandler(), fixed fauxmo.enable()
+   - Blink rules: trySaved=1s, AP=0.5s, no-wifi=wifiOff
+   - WiFi persist + ESP.restart() on successful config
+   - WiFi icon at line2 col10; time at line2 col11..15 (HH:MM) shown only when motor OFF
+   - All pins unchanged; WebOTA & fauxmo preserved
 */
 
 #include <Arduino.h>
@@ -36,15 +35,14 @@ const int sensor4 = 4;   // D2
 const int relayPin = 16; // D0
 const int manualPin = 2; // D4
 
-// WiFi symbols (you provided)
+// WiFi symbols (as provided)
 byte wifiOn[8]  = {B00000,B01110,B10001,B00100,B01010,B00000,B00100,B00000};
 byte wifiOff[8] = {B10001,B11111,B11011,B00100,B01010,B10001,B10101,B00000};
 
-// State
-bool wifiConnected = false;   // true when STA connected
-bool apActive = false;        // true while AP server is running
+// State variables
+bool wifiConnected = false;   // when STA connected
+bool apActive = false;        // AP server running
 unsigned long apStartMillis = 0;
-unsigned long tryStartMillis = 0;
 
 bool motorON = false;
 bool lastMotorState = false;
@@ -56,9 +54,9 @@ unsigned long rtcOffsetSeconds = 0;
 unsigned long rtcLastSyncMillis = 0;
 
 // Timers & intervals
-const unsigned long TRY_SAVED_MS   = 15000UL;  // try saved wifi for 15s
-const unsigned long AP_TOTAL_MS    = 120000UL; // AP stays for 2 minutes
-const unsigned long AP_SCROLL_MS   = 30000UL;  // start scrolling after 30s
+const unsigned long TRY_SAVED_MS   = 15000UL;   // try saved wifi for 15s
+const unsigned long AP_TOTAL_MS    = 120000UL;  // AP stays for 2 minutes
+const unsigned long AP_SCROLL_MS   = 30000UL;   // start scrolling after 30s
 
 // Blink control
 unsigned long blinkTicker = 0;
@@ -140,9 +138,6 @@ void handleSave() {
 
   String resp = "<!doctype html><html><body><h3>Attempting to connect...</h3><p>If successful the device will stop AP and reboot to apply settings.</p></body></html>";
   server.send(200, "text/html", resp);
-
-  // mark apStartMillis so loop can watch attempts
-  // actual success detection and reboot handled in loop
 }
 
 // Start AP and register handlers (non-blocking)
@@ -166,13 +161,11 @@ void startCustomAP() {
   blinkState = false;
 }
 
-// Stop AP
+// Stop AP (DO NOT call removeHandler)
 void stopCustomAP() {
   if (!apActive) return;
   Serial.println("Stopping AP");
-  server.removeHandler("/");
-  server.removeHandler("/save");
-  server.stop();
+  server.stop();                  // stop listening; handlers may remain but server is stopped
   WiFi.softAPdisconnect(true);
   apActive = false;
 }
@@ -281,7 +274,7 @@ void setup() {
   fauxmo.setPort(80);
   fauxmo.addDevice("Motor");
   fauxmo.onSetState(wemoCallback);
-  fauxmo.enable(true, true);
+  fauxmo.enable(true);   // <-- fixed API: single argument
 
   Serial.println("Setup complete.");
 }
@@ -349,7 +342,8 @@ void loop() {
       stopCustomAP();
       apActive = false;
       wifiConnected = false;
-      // present normal offline display briefly
+
+      // Option 1: show normal screen (wifiOff) after AP timeout
       lcd.clear();
       lcd.setCursor(0,0); lcd.print("Water Level:");
       lcd.setCursor(0,1); lcd.print("Motor:OFF ");
