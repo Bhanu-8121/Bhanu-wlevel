@@ -5,16 +5,13 @@
 #include <WiFiUdp.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266HTTPUpdateServer.h>
-#include <WiFiManager.h> // <-- ADDED
+#include <WiFiManager.h> 
 
 // ===== WEB OTA =====
 ESP8266WebServer server(80);
 ESP8266HTTPUpdateServer httpUpdater;
 
 // ===== WIFI =====
-// const char* ssid = "test";      // <-- REMOVED
-// const char* password = "123456789"; // <-- REMOVED
-
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org", 19800, 60000);  // IST
 
@@ -33,7 +30,6 @@ const int relayPin = 16; // D0
 
 // WiFi state
 bool wifiOK = false;
-// All 'firstAttempt' and 'wifiTimeout' variables are REMOVED
 
 unsigned long blinkTime = 0;
 bool blinkState = false;
@@ -48,7 +44,6 @@ unsigned long offsetSeconds = 0;
 
 
 // ===== WiFiManager Callback =====
-// This function gets called when WiFiManager enters AP mode
 void configModeCallback(WiFiManager *myWiFiManager) {
   lcd.clear();
   lcd.setCursor(0, 0); lcd.print("Enter AP Mode");
@@ -62,8 +57,6 @@ void configModeCallback(WiFiManager *myWiFiManager) {
 
 // ===== WEB OTA SETUP (iPhone-compatible) =====
 void setupWebOTA() {
-  // Username = "kbc"
-  // Password = "987654321"
   httpUpdater.setup(&server, "/update", "kbc", "987654321");  
   server.begin();
   Serial.println("WEB OTA Ready!");
@@ -101,15 +94,14 @@ void setup() {
   // --- ADDED WIFI MANAGER ---
   WiFiManager wm;
   
-  // Set callback for AP mode
   wm.setAPCallback(configModeCallback);
 
-  // Set a timeout for the portal. 180 seconds (3 mins).
-  // If no one configures it, it will stop the AP and continue (in offline mode).
-  wm.setConfigPortalTimeout(180);
+  // How long to try a saved WiFi before starting the AP
+  wm.setConnectTimeout(30); // 30 seconds
 
-  // This is a blocking call. It will handle connecting, or
-  // start the "KBC-Setup" (password: 12345678) AP.
+  // How long the "KBC-Setup" AP stays active
+  wm.setConfigPortalTimeout(180); // 3 minutes
+
   if (!wm.autoConnect("KBC-Setup", "12345678")) {
     Serial.println("Failed to connect and hit timeout. Running offline.");
   } else {
@@ -122,10 +114,9 @@ void setup() {
   lcd.clear(); 
 
   // Enable Auto-Reconnect
-  WiFi.setAutoReconnect(true); // <-- ADDED
+  WiFi.setAutoReconnect(true); 
 
   // ---- START WEB OTA ----
-  // This MUST be after WiFiManager is done, to avoid port 80 conflict
   setupWebOTA();
 }
 
@@ -134,17 +125,10 @@ void loop() {
 
   bool isConnected = (WiFi.status() == WL_CONNECTED);
 
-  // This block for 'firstAttempt' is now completely GONE.
-  
   // This block runs once when WiFi connects (or reconnects)
   if (isConnected && !wifiOK) {
     wifiOK = true;
-    timeClient.begin();
-    if(timeClient.update()) {
-      timeSynced = true;
-      lastSyncMillis = millis();
-      offsetSeconds = timeClient.getHours()*3600 + timeClient.getMinutes()*60 + timeClient.getSeconds();
-    }
+    timeClient.begin(); // <-- FIX 1: Just begin the client here.
 
     lcd.clear(); // Clear screen to show "WiFi Connected"
     lcd.setCursor(0,0); lcd.print("Water Level:"); // Re-print top line
@@ -165,6 +149,19 @@ void loop() {
     lcd.setCursor(0,1); lcd.print("Motor:OFF       ");
     lcd.setCursor(10,1); lcd.write(1);
   }
+
+  // **********************************
+  // *** FIX 2: ADDED THIS BLOCK ***
+  // --- Maintain NTP Time Sync ---
+  // This will keep trying to update. The library handles the 60s interval.
+  if (isConnected && timeClient.update()) {
+    // timeClient.update() only returns true on a successful sync
+    timeSynced = true;
+    lastSyncMillis = millis();
+    offsetSeconds = timeClient.getHours()*3600 + timeClient.getMinutes()*60 + timeClient.getSeconds();
+  }
+  // **********************************
+
 
   // Get current time (either from "soft RTC" or "--:--")
   String currentTime = "--:--";
