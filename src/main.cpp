@@ -31,10 +31,9 @@ const int relayPin = 16; // D0
 // WiFi state
 bool wifiOK = false;
 
-// --- FIX 1: WiFi Manager State ---
+// WiFi Manager State
 unsigned long connectStartMillis = 0;
 bool apModeLaunched = false; // Flag to ensure AP only runs once
-// ---
 
 bool motorON = false;
 unsigned long motorTime = 0;
@@ -44,6 +43,10 @@ bool timeSynced = false;
 unsigned long lastSyncMillis = 0;
 unsigned long offsetSeconds = 0;
 
+// --- BLINK FIX: Added variables ---
+unsigned long blinkTicker = 0;
+bool blinkState = false;
+// ---
 
 // ===== WiFiManager Callback =====
 void configModeCallback(WiFiManager *myWiFiManager) {
@@ -93,22 +96,15 @@ void setup() {
   lcd.setCursor(10,1); lcd.write(1); // Show WiFi Off icon
   lcd.setCursor(11,1); lcd.print("--:--");
 
-  // --- FIX 1: Start non-blocking WiFi connection ---
-  // This lets the loop() run immediately.
+  // Start non-blocking WiFi connection
   WiFi.setAutoReconnect(true); 
   WiFi.begin();
   connectStartMillis = millis();
-  // ---
-  
-  // ---- START WEB OTA ----
-  // This is safe now, server.begin() only runs if WiFi connects.
-  // We will call setupWebOTA() again if we connect via AP.
 }
 
 void loop() {
   
-  // --- FIX 1: WiFi/AP Manager Logic ---
-  // This logic now runs in the loop, not setup()
+  // --- WiFi/AP Manager Logic ---
   bool isConnected = (WiFi.status() == WL_CONNECTED);
   
   // Check if 30s have passed, we're not connected, and we haven't launched the AP yet
@@ -143,9 +139,7 @@ void loop() {
   if (isConnected && !wifiOK) {
     wifiOK = true;
     timeClient.begin(); // Start the time client
-
-    // Re-initialize OTA server just in case we just connected
-    setupWebOTA(); 
+    setupWebOTA(); // Initialize OTA server
 
     lcd.clear(); // Clear screen to show "WiFi Connected"
     lcd.setCursor(0,0); lcd.print("Water Level:"); // Re-print top line
@@ -160,8 +154,6 @@ void loop() {
   // This block runs once when WiFi disconnects
   if (!isConnected && wifiOK) {
     wifiOK = false;
-    // --- FIX 2: REMOVED "timeSynced = false;" ---
-    // The "soft RTC" will now continue to run.
     
     lcd.setCursor(0,1); lcd.print("WiFi Disconnect ");
     delay(1500);
@@ -179,7 +171,7 @@ void loop() {
 
   // Get current time (either from "soft RTC" or "--:--")
   String currentTime = "--:--";
-  if (timeSynced) { // This will now stay true after first sync
+  if (timeSynced) {
     unsigned long elapsed = (millis() - lastSyncMillis)/1000;
     unsigned long total = offsetSeconds + elapsed;
     int h = (total/3600) % 24;
@@ -235,12 +227,25 @@ void loop() {
     lcd.print("Motor:OFF ");
     lcd.setCursor(10,1);
 
-    // Simplified WiFi icon logic
+    // --- BLINK FIX: Updated WiFi icon logic ---
     if (wifiOK) {
-      lcd.write(0); // wifiOn
+      lcd.write(0); // wifiOn (Stable)
     } else {
-      lcd.write(1); // wifiOff
+      // If not connected, check if we are in the initial 30s window
+      if (!apModeLaunched) { 
+        // We are in the first 30s, so BLINK the 'On' icon
+        if (millis() - blinkTicker >= 500) {
+          blinkTicker = millis();
+          blinkState = !blinkState;
+        }
+        if (blinkState) lcd.write((uint8_t)0); // wifiOn
+        else lcd.print(" "); // Space
+      } else {
+        // AP has been tried, we are permanently offline
+        lcd.write(1); // wifiOff (Stable)
+      }
     }
+    // --- END BLINK FIX ---
 
     lcd.setCursor(11,1); lcd.print(currentTime);
   }
