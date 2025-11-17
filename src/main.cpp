@@ -1,4 +1,3 @@
-#include <Arduino.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <ESP8266WiFi.h>
@@ -6,342 +5,234 @@
 #include <WiFiUdp.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266HTTPUpdateServer.h>
-#include <fauxmoESP.h>
+#include <WiFiManager.h> // <-- ADDED
 
-// ---------- Global Objects ----------
+// ===== WEB OTA =====
 ESP8266WebServer server(80);
 ESP8266HTTPUpdateServer httpUpdater;
-fauxmoESP fauxmo;
+
+// ===== WIFI =====
+// const char* ssid = "test";      // <-- REMOVED
+// const char* password = "123456789"; // <-- REMOVED
 
 WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "pool.ntp.org", 19800, 60000); // IST = UTC+5:30
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 19800, 60000);  // IST
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-// ---------- Pins ----------
+// WiFi Symbols
+byte wifiOn[8]  = {B00000,B01110,B10001,B00100,B01010,B00000,B00100,B00000};
+byte wifiOff[8] = {B10001,B11111,B11011,B00100,B01010,B10001,B10101,B00000};
+
+// Pins
 const int sensor1 = 14;  // D5
 const int sensor2 = 12;  // D6
 const int sensor3 = 13;  // D7
 const int sensor4 = 4;   // D2
 const int relayPin = 16; // D0
-const int manualPin = 2; // D4
 
-// ---------- WiFi Icons ----------
-byte wifiOn[8]  = {B00000,B01110,B10001,B00100,B01010,B00000,B00100,B00000};
-byte wifiOff[8] = {B10001,B11111,B11011,B00100,B01010,B10001,B10101,B00000};
+// WiFi state
+bool wifiOK = false;
+// All 'firstAttempt' and 'wifiTimeout' variables are REMOVED
 
-// ---------- Global State ----------
-bool wifiConnected = false;
-bool apActive = false;
-unsigned long apStartMillis = 0;
-unsigned long blinkTicker = 0;
+unsigned long blinkTime = 0;
 bool blinkState = false;
 
 bool motorON = false;
-bool lastMotorState = false;
 unsigned long motorTime = 0;
 
+// Local RTC
 bool timeSynced = false;
-unsigned long rtcOffsetSeconds = 0;
-unsigned long rtcLastSyncMillis = 0;
+unsigned long lastSyncMillis = 0;
+unsigned long offsetSeconds = 0;
 
-bool lastConnected = false;
 
-// CRITICAL FIX: Save credentials when they are valid!
-String savedSSID = "";
-String savedPASS = "";
-
-const unsigned long TRY_SAVED_MS   = 15000UL;
-const unsigned long AP_TOTAL_MS    = 180000UL;  // 3 minutes AP timeout
-const unsigned long AP_SCROLL_MS   = 30000UL;
-
-// ---------- Helper Functions ----------
-void formatHHMM(unsigned long totalSeconds, char *out) {
-  unsigned long h = (totalSeconds / 3600UL) % 24;
-  unsigned long m = (totalSeconds / 60UL) % 60;
-  sprintf(out, "%02lu:%02lu", h, m);
+// ===== WiFiManager Callback =====
+// This function gets called when WiFiManager enters AP mode
+void configModeCallback(WiFiManager *myWiFiManager) {
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("Enter AP Mode");
+  lcd.setCursor(0, 1); lcd.print("SSID:");
+  lcd.setCursor(5, 1); lcd.print(myWiFiManager->getConfigPortalSSID());
+  Serial.println("Entered config mode");
+  Serial.println(WiFi.softAPIP());
+  Serial.println(myWiFiManager->getConfigPortalSSID());
 }
 
-void getCurrentHHMM(char *out) {
-  if (WiFi.status() == WL_CONNECTED && timeClient.update()) {
-    String t = timeClient.getFormattedTime();
-    t.substring(0,5).toCharArray(out, 6);
-    return;
-  }
-  if (timeSynced) {
-    unsigned long elapsed = (millis() - rtcLastSyncMillis) / 1000UL;
-    unsigned long total = rtcOffsetSeconds + elapsed;
-    formatHHMM(total, out);
-    return;
-  }
-  strcpy(out, "--:--");
-}
 
-void lcdShowWifi(bool connected) {
-  lcd.setCursor(10,1);
-  lcd.write((uint8_t)(connected ? 0 : 1));
-}
-
-// ---------- AP Mode Web Pages ----------
-String htmlFormPage(const String &msg = "") {
-  String s = "<!doctype html><html><head><meta name='viewport' content='width=device-width'></head><body style='font-family:Arial;margin:40px'>";
-  s += "<h3>KBC Water Tank Setup</h3>";
-  if (msg.length()) s += "<p style='color:red'><b>" + msg + "</b></p>";
-  s += "<form method='POST' action='/save'>";
-  s += "SSID:<br><input name='ssid' required><br><br>";
-  s += "Password:<br><input type='password' name='pwd'><br><br>";
-  s += "<input type='submit' value='Save & Connect' style='padding:10px 20px;font-size:16px'>";
-  s += "</form><hr><small>AP: KBC-Setup | Pass: 12345678</small></body></html>";
-  return s;
-}
-
-void handleRoot() { server.send(200, "text/html", htmlFormPage()); }
-
-void handleSave() {
-  String ssid = server.arg("ssid");
-  String pwd  = server.arg("pwd");
-
-  if (ssid.length() == 0) {
-    server.send(200, "text/html", htmlFormPage("SSID cannot be empty!"));
-    return;
-  }
-
-  server.send(200, "text/html", "<html><body><h3>Connecting to " + ssid + "...</h3><p>Device will restart if successful.</p></body></html>");
-
-  WiFi.persistent(true);
-  WiFi.begin(ssid.c_str(), pwd.c_str());
-  delay(500);
-  ESP.restart();
-}
-
-// ---------- AP Control ----------
-void startCustomAP() {
-  if (apActive) return;
-
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP("KBC-Setup", "12345678");
-
-  server.on("/", HTTP_GET, handleRoot);
-  server.on("/save", HTTP_POST, handleSave);
-  server.begin();
-
-  apActive = true;
-  apStartMillis = millis();
-  blinkTicker = millis();
-}
-
-void stopCustomAP() {
-  if (!apActive) return;
-  server.stop();
-  WiFi.softAPdisconnect(true);
-  WiFi.mode(WIFI_STA);  // Important!
-  apActive = false;
-}
-
-// ---------- WiFi Connection ----------
-bool trySavedWifi() {
-  WiFi.mode(WIFI_STA);
-  WiFi.persistent(true);
-  WiFi.setAutoReconnect(true);  // Very important!
-  WiFi.begin();
-
-  unsigned long start = millis();
-  while (millis() - start < TRY_SAVED_MS) {
-    if (WiFi.status() == WL_CONNECTED) {
-      wifiConnected = true;
-
-      // SAVE CREDENTIALS WHILE THEY ARE VALID!
-      savedSSID = WiFi.SSID();
-      savedPASS = WiFi.psk();
-
-      Serial.print("Connected! IP: ");
-      Serial.println(WiFi.localIP());
-      Serial.println("Saved SSID: " + savedSSID);
-
-      timeClient.begin();
-      if (timeClient.update()) {
-        timeSynced = true;
-        rtcOffsetSeconds = timeClient.getHours()*3600UL +
-                           timeClient.getMinutes()*60UL +
-                           timeClient.getSeconds();
-        rtcLastSyncMillis = millis();
-      }
-      lastConnected = true;
-      return true;
-    }
-    delay(200);
-  }
-
-  wifiConnected = false;
-  lastConnected = false;
-  return false;
-}
-
-// ---------- OTA ----------
+// ===== WEB OTA SETUP (iPhone-compatible) =====
 void setupWebOTA() {
-  httpUpdater.setup(&server, "/update", "kbc", "987654321");
+  // Username = "kbc"
+  // Password = "987654321"
+  httpUpdater.setup(&server, "/update", "kbc", "987654321");  
   server.begin();
+  Serial.println("WEB OTA Ready!");
+  Serial.print("Go to: http://");
+  Serial.print(WiFi.localIP());
+  Serial.println("/update");
 }
 
-// ---------- Fauxmo (Alexa) ----------
-void wemoCallback(unsigned char device_id, const char *device_name, bool state, unsigned char value) {
-  motorON = state;
-  if (motorON && !lastMotorState) motorTime = millis();
-  Serial.printf("Alexa: Motor %s\n", state ? "ON" : "OFF");
-}
 
-// ---------- Setup ----------
 void setup() {
   Serial.begin(115200);
-  delay(200);
 
   pinMode(sensor1, INPUT_PULLUP);
   pinMode(sensor2, INPUT_PULLUP);
   pinMode(sensor3, INPUT_PULLUP);
   pinMode(sensor4, INPUT_PULLUP);
   pinMode(relayPin, OUTPUT);
-  pinMode(manualPin, INPUT_PULLUP);
   digitalWrite(relayPin, LOW);
 
-  Wire.begin(0, 5);  // SDA=D1=0, SCL=D2=5 on NodeMCU
-  lcd.init();
-  lcd.backlight();
+  Wire.begin(0, 5);
+  lcd.init(); lcd.backlight();
   lcd.createChar(0, wifiOn);
   lcd.createChar(1, wifiOff);
 
-  lcd.clear();
-  lcd.setCursor(4,0); lcd.print("KB.C");
+  lcd.setCursor(6,0); lcd.print("K.B.C");
   lcd.setCursor(0,1); lcd.print("Home Automation");
-  delay(1500);
+  delay(2000); lcd.clear();
 
-  if (!trySavedWifi()) {
-    startCustomAP();
+  // Print the default "offline" screen
+  lcd.setCursor(0,0); lcd.print("Water Level:");
+  lcd.setCursor(0,1); lcd.print("Motor:OFF ");
+  lcd.setCursor(10,1); lcd.write(1); // Show WiFi Off icon
+  lcd.setCursor(11,1); lcd.print("--:--");
+
+  // --- ADDED WIFI MANAGER ---
+  WiFiManager wm;
+  
+  // Set callback for AP mode
+  wm.setAPCallback(configModeCallback);
+
+  // Set a timeout for the portal. 180 seconds (3 mins).
+  // If no one configures it, it will stop the AP and continue (in offline mode).
+  wm.setConfigPortalTimeout(180);
+
+  // This is a blocking call. It will handle connecting, or
+  // start the "KBC-Setup" (password: 12345678) AP.
+  if (!wm.autoConnect("KBC-Setup", "12345678")) {
+    Serial.println("Failed to connect and hit timeout. Running offline.");
+  } else {
+    Serial.println("WiFi Connected!");
   }
+  
+  // --- END WIFI MANAGER ---
 
+  // Clear the AP mode message from LCD
+  lcd.clear(); 
+
+  // Enable Auto-Reconnect
+  WiFi.setAutoReconnect(true); // <-- ADDED
+
+  // ---- START WEB OTA ----
+  // This MUST be after WiFiManager is done, to avoid port 80 conflict
   setupWebOTA();
-
-  fauxmo.createServer(true);
-  fauxmo.setPort(80);
-  fauxmo.addDevice("Motor");
-  fauxmo.onSetState(wemoCallback);
-  fauxmo.enable(true);
 }
 
-// ---------- Main Loop ----------
 void loop() {
-  server.handleClient();
-  fauxmo.handle();
-
-  // ---------- Read Sensors ----------
-  bool s1 = digitalRead(sensor1) == LOW;
-  bool s2 = digitalRead(sensor2) == LOW;
-  bool s3 = digitalRead(sensor3) == LOW;
-  bool s4 = digitalRead(sensor4) == LOW;
-
-  String level = "0%";
-  if (s4 && s3 && s2 && s1) level = "100%";
-  else if (s3 && s2 && s1)  level = "75%";
-  else if (s2 && s1)        level = "50%";
-  else if (s1)              level = "25%";
+  server.handleClient();   // <==== IMPORTANT FOR WEB OTA
 
   bool isConnected = (WiFi.status() == WL_CONNECTED);
 
-  // ---------- AP MODE ----------
-  if (apActive) {
-    lcd.setCursor(0,0); lcd.print("Water Level:");
-    lcd.setCursor(12,0); lcd.print("    ");
-    lcd.setCursor(12,0); lcd.print(level);
-
-    // Blinking WiFi icon
-    if (millis() - blinkTicker >= 500) {
-      blinkTicker = millis();
-      blinkState = !blinkState;
-      lcd.setCursor(10,1);
-      lcd.write(blinkState ? 0 : 32);  // 32 = space
-    }
-
-    // Auto exit AP if WiFi connects
-    if (isConnected && savedSSID.length() > 0) {
-      stopCustomAP();
-      delay(500);
-      ESP.restart();
-    }
-
-    // AP timeout
-    if (millis() - apStartMillis > AP_TOTAL_MS) {
-      stopCustomAP();
-    }
-    delay(200);
-    return;
-  }
-
-  // ---------- WiFi Reconnection (THE FIX!) ----------
-  if (!isConnected && savedSSID.length() > 0) {
-    static unsigned long lastReconnectAttempt = 0;
-    if (millis() - lastReconnectAttempt > 10000) {
-      lastReconnectAttempt = millis();
-      Serial.print("WiFi lost! Reconnecting to: ");
-      Serial.println(savedSSID);
-      WiFi.disconnect();
-      delay(100);
-      WiFi.begin(savedSSID.c_str(), savedPASS.c_str());
-    }
-  }
-
-  // Fresh reconnect detected
-  if (isConnected && !lastConnected) {
-    Serial.println("WiFi Reconnected!");
-    savedSSID = WiFi.SSID();  // Refresh just in case
-    savedPASS = WiFi.psk();
-
+  // This block for 'firstAttempt' is now completely GONE.
+  
+  // This block runs once when WiFi connects (or reconnects)
+  if (isConnected && !wifiOK) {
+    wifiOK = true;
     timeClient.begin();
-    if (timeClient.update()) {
+    if(timeClient.update()) {
       timeSynced = true;
-      rtcOffsetSeconds = timeClient.getHours()*3600UL +
-                         timeClient.getMinutes()*60UL +
-                         timeClient.getSeconds();
-      rtcLastSyncMillis = millis();
+      lastSyncMillis = millis();
+      offsetSeconds = timeClient.getHours()*3600 + timeClient.getMinutes()*60 + timeClient.getSeconds();
     }
+
+    lcd.clear(); // Clear screen to show "WiFi Connected"
+    lcd.setCursor(0,0); lcd.print("Water Level:"); // Re-print top line
+    lcd.setCursor(0,1); lcd.print("WiFi Connected  ");
+    delay(1500);
+    lcd.setCursor(0,1); lcd.print("                "); // Clear bottom line
+
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
   }
-  lastConnected = isConnected;
 
-  // ---------- Manual Button ----------
-  static unsigned long lastPress = 0;
-  if (digitalRead(manualPin) == LOW && millis() - lastPress > 400) {
-    motorON = !motorON;
-    if (motorON) motorTime = millis();
-    lastPress = millis();
-    delay(200);
+  // This block runs once when WiFi disconnects
+  if (!isConnected && wifiOK) {
+    wifiOK = false;
+    timeSynced = false; // Time is no longer reliable
+    lcd.setCursor(0,1); lcd.print("WiFi Disconnect ");
+    delay(1500);
+    lcd.setCursor(0,1); lcd.print("Motor:OFF       ");
+    lcd.setCursor(10,1); lcd.write(1);
   }
 
-  // ---------- Auto Motor Logic ----------
-  if (level == "0%")  motorON = true;
-  if (level == "100%") motorON = false;
+  // Get current time (either from "soft RTC" or "--:--")
+  String currentTime = "--:--";
+  if (timeSynced) {
+    unsigned long elapsed = (millis() - lastSyncMillis)/1000;
+    unsigned long total = offsetSeconds + elapsed;
+    int h = (total/3600) % 24;
+    int m = (total/60) % 60;
+    char buf[6];
+    sprintf(buf, "%02d:%02d", h, m);
+    currentTime = String(buf);
+  }
 
-  if (motorON && !lastMotorState) motorTime = millis();
-  lastMotorState = motorON;
-  digitalWrite(relayPin, motorON ? HIGH : LOW);
+  // Sensor reading (with de-bounce)
+  bool s1=false,s2=false,s3=false,s4=false;
+  int s4c=0;
+  for(int i=0;i<7;i++){
+    if (digitalRead(sensor1)==LOW) s1=true;
+    if (digitalRead(sensor2)==LOW) s2=true;
+    if (digitalRead(sensor3)==LOW) s3=true;
+    if (digitalRead(sensor4)==LOW) s4c++;
+    delay(10);
+  }
+  s4 = (s4c>=5);
 
-  // ---------- LCD Update ----------
-  lcd.setCursor(0,0);
-  lcd.print("Water Level:");
-  lcd.setCursor(12,0); lcd.print("    ");
+  // Level logic
+  String level;
+  if (s4&&s3&&s2&&s1) level="100%";
+  else if (s3&&s2&&s1) level="75%";
+  else if (s2&&s1) level="50%";
+  else if (s1) level="25%";
+  else level="0%";
+
+  // Update LCD - Level
+  lcd.setCursor(0,0); lcd.print("Water Level:"); // Re-print in case it was cleared
+  lcd.setCursor(12,0); lcd.print("    "); 
   lcd.setCursor(12,0); lcd.print(level);
 
-  lcd.setCursor(0,1);
-  if (motorON) {
-    int mins = (millis() - motorTime) / 60000;
-    char buf[17];
-    sprintf(buf, "Motor:ON %02dM  ", mins);
-    lcd.print(buf);
-  } else {
-    lcd.print("Motor:OFF ");
-    char hhmm[6];
-    getCurrentHHMM(hhmm);
-    lcd.setCursor(11,1); lcd.print(hhmm);
+  // Motor Logic
+  if (level=="0%" && !motorON){
+    motorON=true; digitalWrite(relayPin,HIGH); motorTime=millis();
+  }
+  if (level=="100%" && motorON){
+    motorON=false; digitalWrite(relayPin,LOW);
   }
 
-  lcdShowWifi(isConnected);
+  // Update LCD - Bottom Line
+  lcd.setCursor(0,1);
+  if (motorON){
+    int mins=(millis()-motorTime)/60000;
+    char buf[17]; // 16 chars + null
+    sprintf(buf,"Motor:ON frm %02dM",mins);
+    lcd.print(buf);
+    lcd.print(" "); // Clear rest of line
+  }
+  else{
+    lcd.print("Motor:OFF ");
+    lcd.setCursor(10,1);
+
+    // Simplified WiFi icon logic
+    if (wifiOK) {
+      lcd.write(0); // wifiOn
+    } else {
+      lcd.write(1); // wifiOff
+    }
+
+    lcd.setCursor(11,1); lcd.print(currentTime);
+  }
 
   delay(200);
 }
