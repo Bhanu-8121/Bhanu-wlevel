@@ -31,8 +31,10 @@ const int relayPin = 16; // D0
 // WiFi state
 bool wifiOK = false;
 
-unsigned long blinkTime = 0;
-bool blinkState = false;
+// --- FIX 1: WiFi Manager State ---
+unsigned long connectStartMillis = 0;
+bool apModeLaunched = false; // Flag to ensure AP only runs once
+// ---
 
 bool motorON = false;
 unsigned long motorTime = 0;
@@ -91,44 +93,59 @@ void setup() {
   lcd.setCursor(10,1); lcd.write(1); // Show WiFi Off icon
   lcd.setCursor(11,1); lcd.print("--:--");
 
-  // --- ADDED WIFI MANAGER ---
-  WiFiManager wm;
-  
-  wm.setAPCallback(configModeCallback);
-
-  // How long to try a saved WiFi before starting the AP
-  wm.setConnectTimeout(30); // 30 seconds
-
-  // How long the "KBC-Setup" AP stays active
-  wm.setConfigPortalTimeout(180); // 3 minutes
-
-  if (!wm.autoConnect("KBC-Setup", "12345678")) {
-    Serial.println("Failed to connect and hit timeout. Running offline.");
-  } else {
-    Serial.println("WiFi Connected!");
-  }
-  
-  // --- END WIFI MANAGER ---
-
-  // Clear the AP mode message from LCD
-  lcd.clear(); 
-
-  // Enable Auto-Reconnect
+  // --- FIX 1: Start non-blocking WiFi connection ---
+  // This lets the loop() run immediately.
   WiFi.setAutoReconnect(true); 
-
+  WiFi.begin();
+  connectStartMillis = millis();
+  // ---
+  
   // ---- START WEB OTA ----
-  setupWebOTA();
+  // This is safe now, server.begin() only runs if WiFi connects.
+  // We will call setupWebOTA() again if we connect via AP.
 }
 
 void loop() {
-  server.handleClient();   // <==== IMPORTANT FOR WEB OTA
-
+  
+  // --- FIX 1: WiFi/AP Manager Logic ---
+  // This logic now runs in the loop, not setup()
   bool isConnected = (WiFi.status() == WL_CONNECTED);
+  
+  // Check if 30s have passed, we're not connected, and we haven't launched the AP yet
+  if (!isConnected && !apModeLaunched && (millis() - connectStartMillis > 30000)) {
+    Serial.println("30s timeout. Launching Config Portal...");
+    
+    // Launch the blocking AP. This will pause the loop for 3 mins.
+    WiFiManager wm;
+    wm.setAPCallback(configModeCallback);
+    wm.setConfigPortalTimeout(180); // 3 minutes
+    
+    if (wm.startConfigPortal("KBC-Setup", "12345678")) {
+        Serial.println("AP connection successful!");
+    } else {
+        Serial.println("AP timeout. Running offline.");
+    }
+    apModeLaunched = true; // Set flag so we don't run this again
+    
+    // Check if we are NOW connected (after AP)
+    isConnected = (WiFi.status() == WL_CONNECTED);
+  }
+  // --- End WiFi/AP Logic ---
+
+
+  // This must be checked every loop
+  if (isConnected) {
+    server.handleClient(); // Handle OTA requests
+  }
+
 
   // This block runs once when WiFi connects (or reconnects)
   if (isConnected && !wifiOK) {
     wifiOK = true;
-    timeClient.begin(); // <-- FIX 1: Just begin the client here.
+    timeClient.begin(); // Start the time client
+
+    // Re-initialize OTA server just in case we just connected
+    setupWebOTA(); 
 
     lcd.clear(); // Clear screen to show "WiFi Connected"
     lcd.setCursor(0,0); lcd.print("Water Level:"); // Re-print top line
@@ -143,29 +160,26 @@ void loop() {
   // This block runs once when WiFi disconnects
   if (!isConnected && wifiOK) {
     wifiOK = false;
-    timeSynced = false; // Time is no longer reliable
+    // --- FIX 2: REMOVED "timeSynced = false;" ---
+    // The "soft RTC" will now continue to run.
+    
     lcd.setCursor(0,1); lcd.print("WiFi Disconnect ");
     delay(1500);
     lcd.setCursor(0,1); lcd.print("Motor:OFF       ");
     lcd.setCursor(10,1); lcd.write(1);
   }
 
-  // **********************************
-  // *** FIX 2: ADDED THIS BLOCK ***
   // --- Maintain NTP Time Sync ---
-  // This will keep trying to update. The library handles the 60s interval.
   if (isConnected && timeClient.update()) {
-    // timeClient.update() only returns true on a successful sync
     timeSynced = true;
     lastSyncMillis = millis();
     offsetSeconds = timeClient.getHours()*3600 + timeClient.getMinutes()*60 + timeClient.getSeconds();
   }
-  // **********************************
 
 
   // Get current time (either from "soft RTC" or "--:--")
   String currentTime = "--:--";
-  if (timeSynced) {
+  if (timeSynced) { // This will now stay true after first sync
     unsigned long elapsed = (millis() - lastSyncMillis)/1000;
     unsigned long total = offsetSeconds + elapsed;
     int h = (total/3600) % 24;
