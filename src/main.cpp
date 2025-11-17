@@ -43,10 +43,9 @@ bool timeSynced = false;
 unsigned long lastSyncMillis = 0;
 unsigned long offsetSeconds = 0;
 
-// --- BLINK FIX: Added variables ---
+// BLINK variables
 unsigned long blinkTicker = 0;
 bool blinkState = false;
-// ---
 
 // ===== WiFiManager Callback =====
 void configModeCallback(WiFiManager *myWiFiManager) {
@@ -141,6 +140,11 @@ void loop() {
     timeClient.begin(); // Start the time client
     setupWebOTA(); // Initialize OTA server
 
+    // *** THIS IS THE FIX ***
+    // We've connected once, so disable the 30-second AP mode check
+    apModeLaunched = true; 
+    // *********************
+
     lcd.clear(); // Clear screen to show "WiFi Connected"
     lcd.setCursor(0,0); lcd.print("Water Level:"); // Re-print top line
     lcd.setCursor(0,1); lcd.print("WiFi Connected  ");
@@ -227,7 +231,7 @@ void loop() {
     lcd.print("Motor:OFF ");
     lcd.setCursor(10,1);
 
-    // --- BLINK FIX: Updated WiFi icon logic ---
+    // WiFi icon logic
     if (wifiOK) {
       lcd.write(0); // wifiOn (Stable)
     } else {
@@ -245,7 +249,6 @@ void loop() {
         lcd.write(1); // wifiOff (Stable)
       }
     }
-    // --- END BLINK FIX ---
 
     lcd.setCursor(11,1); lcd.print(currentTime);
   }
