@@ -1,7 +1,5 @@
-/* Water motor Alexa - FINAL + WEB SERIAL MONITOR (PORT 82)
-   - Alexa on port 80
-   - OTA on port 81
-   - Serial monitor webpage on port 82 → http://<IP>/log
+/* Water motor Alexa - FINAL with alexaServer (port 80), OTA(81), WebLog(82)
+   - Adds alexaServer HTTP handlers so Alexa OFF/ON both work reliably
    - Manual switch on D4 (GPIO2)
    - 100% tank lock
 */
@@ -16,8 +14,9 @@
 #include <WiFiManager.h>
 #include <Espalexa.h>
 
-// ==== Alexa ====
+// ==== Alexa (requires port 80 server) ====
 Espalexa espalexa;
+ESP8266WebServer alexaServer(80);
 
 // ==== OTA on port 81 ====
 ESP8266WebServer server(81);
@@ -30,18 +29,13 @@ String serialBuffer = "";
 // Function to record logs
 void addLog(String msg) {
     Serial.println(msg);
-
     serialBuffer += msg + "\n";
-
-    // Limit size (keep last ~200 lines)
-    if (serialBuffer.length() > 8000)
-        serialBuffer.remove(0, 3000);
+    if (serialBuffer.length() > 8000) serialBuffer.remove(0, 3000);
 }
 
 // ==== WIFI / TIME ====
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org", 19800, 60000);
-
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
 // WiFi Icons
@@ -71,279 +65,261 @@ unsigned long offsetSeconds = 0;
 String globalLevel = "0%";
 int lastSwitchState = HIGH;
 
+// Forward declarations
+void requestMotorOn(String source, String level);
+void requestMotorOff(String source);
+void alexaServerSetup();
+void setupWebOTA();
+void setupWebLogServer();
+void configModeCallback(WiFiManager *wm);
 
-// =========================================
-//        MOTOR CONTROL SAFE LOGIC
-// =========================================
+// ---------- Espalexa callback ----------
+void alexaCallback(uint8_t id, bool state) {
+  String level = globalLevel;
 
-void requestMotorOn(String source, String level)
-{
-    if (level == "100%")
-    {
-        motorON = false;
-        digitalWrite(relayPin, LOW);
-        espalexa.getDevice(0)->setValue(0);
-
-        addLog("BLOCKED: Tank full → ON rejected (" + source + ")");
-        return;
+  if (state) { // Alexa requested ON
+    if (level == "100%") {
+      // Block ON at full tank
+      motorON = false;
+      digitalWrite(relayPin, LOW);
+      if (espalexa.getDevice(0)) espalexa.getDevice(0)->setValue(0);
+      addLog("Alexa ON blocked: Tank full");
+    } else {
+      requestMotorOn("Alexa", level);
     }
-
-    motorON = true;
-    digitalWrite(relayPin, HIGH);
-    motorTime = millis();
-
-    espalexa.getDevice(0)->setValue(255);
-
-    addLog("Motor ON by " + source);
+  } else { // Alexa requested OFF
+    requestMotorOff("Alexa");
+  }
 }
 
-void requestMotorOff(String source)
-{
+// ---------- Motor ON/OFF control ----------
+void requestMotorOn(String source, String level) {
+  if (level == "100%") {
     motorON = false;
     digitalWrite(relayPin, LOW);
-    espalexa.getDevice(0)->setValue(0);
-    addLog("Motor OFF by " + source);
+    if (espalexa.getDevice(0)) espalexa.getDevice(0)->setValue(0);
+    addLog("BLOCKED ON (tank full) from " + source);
+    return;
+  }
+  motorON = true;
+  digitalWrite(relayPin, HIGH);
+  motorTime = millis();
+  if (espalexa.getDevice(0)) espalexa.getDevice(0)->setValue(255);
+  addLog("Motor ON by " + source);
 }
 
+void requestMotorOff(String source) {
+  motorON = false;
+  digitalWrite(relayPin, LOW);
+  if (espalexa.getDevice(0)) espalexa.getDevice(0)->setValue(0);
+  addLog("Motor OFF by " + source);
+}
 
-// =========================================
-//              ALEXA CALLBACK
-// =========================================
-
-void alexaCallback(uint8_t id, bool state)
-{
-    String level = globalLevel;
-
-    if (state) {
-        if (level == "100%") {
-            motorON = false;
-            digitalWrite(relayPin, LOW);
-            espalexa.getDevice(0)->setValue(0);
-            addLog("Alexa tried ON → BLOCKED (full tank)");
-        }
-        else requestMotorOn("Alexa", level);
+// ---------- Alexa server setup (port 80) ----------
+void alexaServerSetup() {
+  // Root endpoint and notFound both forwarded to Espalexa handler
+  alexaServer.on("/", HTTP_GET, []() {
+    // Espalexa expects raw uri and optional "state" arg
+    if (!espalexa.handleAlexaApiCall(alexaServer.uri(), alexaServer.arg("state"))) {
+      alexaServer.send(200, "text/plain", "");
     }
-    else requestMotorOff("Alexa");
+  });
+
+  alexaServer.onNotFound([]() {
+    if (!espalexa.handleAlexaApiCall(alexaServer.uri(), alexaServer.arg("state"))) {
+      alexaServer.send(404, "text/plain", "Not found");
+    }
+  });
+
+  alexaServer.begin();
+  addLog("Alexa server started on port 80");
 }
 
+// ---------- WiFiManager callback ----------
+void configModeCallback(WiFiManager *wm) {
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("Enter AP Mode");
+  lcd.setCursor(0, 1); lcd.print("SSID:");
+  lcd.setCursor(5, 1); lcd.print(wm->getConfigPortalSSID());
+  addLog("Config Portal Started: " + wm->getConfigPortalSSID());
+}
 
-// =========================================
-//              ALEXA SETUP
-// =========================================
-void setupAlexa()
-{
-    espalexa.addDevice("Water Motor", alexaCallback);
+// ---------- OTA setup (port 81) ----------
+void setupWebOTA() {
+  httpUpdater.setup(&server, "/update", "kbc", "987654321");
+  server.begin();
+  addLog("OTA Ready: http://" + WiFi.localIP().toString() + ":81/update");
+}
+
+// ---------- Web Serial Log (port 82) ----------
+void setupWebLogServer() {
+  logServer.on("/log", HTTP_GET, []() {
+    logServer.send(200, "text/plain", serialBuffer);
+  });
+  logServer.begin();
+  addLog("Web Serial Log ready: http://" + WiFi.localIP().toString() + ":82/log");
+}
+
+// ---------- Alexa (Espalexa) setup ----------
+void setupAlexa() {
+  espalexa.addDevice("Water Motor", alexaCallback);
+  // Do not call espalexa.begin() here; we'll call it after alexaServer starts (in wifi-connected block)
+  addLog("Alexa device registered: Water Motor");
+}
+
+// =============================== SETUP ===============================
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(sensor1, INPUT_PULLUP);
+  pinMode(sensor2, INPUT_PULLUP);
+  pinMode(sensor3, INPUT_PULLUP);
+  pinMode(sensor4, INPUT_PULLUP);
+  pinMode(relayPin, OUTPUT);
+  digitalWrite(relayPin, LOW);
+
+  pinMode(switchPin, INPUT_PULLUP);
+
+  Wire.begin(0, 5);
+  lcd.init(); lcd.backlight();
+  lcd.createChar(0, wifiOn);
+  lcd.createChar(1, wifiOff);
+
+  lcd.setCursor(6,0); lcd.print("K.B.C");
+  lcd.setCursor(0,1); lcd.print("Home Automation");
+  delay(2000); lcd.clear();
+
+  lcd.setCursor(0,0); lcd.print("Water Level:");
+  lcd.setCursor(0,1); lcd.print("Motor:OFF ");
+  lcd.setCursor(10,1); lcd.write(1);
+  lcd.setCursor(11,1); lcd.print("--:--");
+
+  WiFi.setAutoReconnect(true);
+  WiFi.begin();
+  connectStartMillis = millis();
+
+  addLog("Booting...");
+  setupAlexa();
+}
+
+// =============================== LOOP ===============================
+void loop() {
+  bool isConnected = (WiFi.status() == WL_CONNECTED);
+
+  // WiFi/AP Manager Logic
+  if (!isConnected && !apModeLaunched && (millis() - connectStartMillis > 30000)) {
+    addLog("30s timeout. Launching Config Portal...");
+    WiFiManager wm;
+    wm.setAPCallback(configModeCallback);
+    wm.setConfigPortalTimeout(180);
+    if (wm.startConfigPortal("KBC-Setup", "12345678")) {
+      addLog("Config portal finished");
+    } else {
+      addLog("Config portal timeout");
+    }
+    apModeLaunched = true;
+    isConnected = (WiFi.status() == WL_CONNECTED);
+  }
+
+  // If WiFi connected, handle OTA server (port 81)
+  if (isConnected) server.handleClient();
+
+  // When WiFi connects first time
+  if (isConnected && !wifiOK) {
+    wifiOK = true;
+    timeClient.begin();
+    setupWebOTA();
+    setupWebLogServer();
+
+    // Start Alexa server and Espalexa now that port 80 is free
+    alexaServerSetup();
     espalexa.begin();
-    addLog("Alexa device added: Water Motor");
-}
 
+    addLog("WiFi Connected: " + WiFi.localIP().toString());
 
-// =========================================
-//           WIFI MANAGER CALLBACK
-// =========================================
-
-void configModeCallback(WiFiManager *wm)
-{
     lcd.clear();
-    lcd.setCursor(0, 0); lcd.print("Enter AP Mode");
-    lcd.setCursor(0, 1); lcd.print("SSID:");
-    lcd.setCursor(5, 1); lcd.print(wm->getConfigPortalSSID());
-
-    addLog("Config Portal Started: " + wm->getConfigPortalSSID());
-}
-
-
-// =========================================
-//              OTA SETUP
-// =========================================
-
-void setupWebOTA()
-{
-    httpUpdater.setup(&server, "/update", "kbc", "987654321");
-    server.begin();
-
-    addLog("OTA Ready: http://" + WiFi.localIP().toString() + ":81/update");
-}
-
-
-// =========================================
-//          WEB SERIAL MONITOR (82)
-// =========================================
-
-void setupWebLogServer()
-{
-    logServer.on("/log", HTTP_GET, []() {
-        logServer.send(200, "text/plain", serialBuffer);
-    });
-
-    logServer.begin();
-    addLog("Web Serial Log ready: http://" + WiFi.localIP().toString() + ":82/log");
-}
-
-
-// =========================================
-//                 SETUP
-// =========================================
-
-void setup()
-{
-    Serial.begin(115200);
-
-    pinMode(sensor1, INPUT_PULLUP);
-    pinMode(sensor2, INPUT_PULLUP);
-    pinMode(sensor3, INPUT_PULLUP);
-    pinMode(sensor4, INPUT_PULLUP);
-    pinMode(relayPin, OUTPUT);
-    digitalWrite(relayPin, LOW);
-
-    pinMode(switchPin, INPUT_PULLUP);
-
-    // LCD
-    Wire.begin(0, 5);
-    lcd.init(); lcd.backlight();
-    lcd.createChar(0, wifiOn);
-    lcd.createChar(1, wifiOff);
-
-    lcd.setCursor(6,0); lcd.print("K.B.C");
-    lcd.setCursor(0,1); lcd.print("Home Automation");
-    delay(2000);
-    lcd.clear();
-
     lcd.setCursor(0,0); lcd.print("Water Level:");
-    lcd.setCursor(0,1); lcd.print("Motor:OFF ");
-    lcd.setCursor(10,1); lcd.write(1);
-    lcd.setCursor(11,1); lcd.print("--:--");
+    lcd.setCursor(0,1); lcd.print("WiFi Connected");
+    delay(1500);
+    lcd.setCursor(0,1); lcd.print(" ");
+  }
 
-    WiFi.setAutoReconnect(true);
-    WiFi.begin();
-    connectStartMillis = millis();
+  // Handle alexa server / espalexa and log server every loop
+  alexaServer.handleClient();
+  espalexa.loop();
+  logServer.handleClient();
 
-    addLog("Booting...");
-    setupAlexa();
-}
+  // Time sync
+  if (isConnected && timeClient.update()) {
+    timeSynced = true;
+    lastSyncMillis = millis();
+    offsetSeconds = timeClient.getHours()*3600 + timeClient.getMinutes()*60 + timeClient.getSeconds();
+  }
 
+  String currentTime = "--:--";
+  if (timeSynced) {
+    unsigned long elapsed = (millis() - lastSyncMillis)/1000;
+    unsigned long total = offsetSeconds + elapsed;
+    int h = (total/3600) % 24;
+    int m = (total/60) % 60;
+    char buf[6];
+    sprintf(buf, "%02d:%02d", h, m);
+    currentTime = String(buf);
+  }
 
-// =========================================
-//                 LOOP
-// =========================================
+  // Sensor reading (with debounce)
+  bool s1=false,s2=false,s3=false;
+  int s4c=0;
+  for (int i=0;i<7;i++){
+    if (digitalRead(sensor1)==LOW) s1=true;
+    if (digitalRead(sensor2)==LOW) s2=true;
+    if (digitalRead(sensor3)==LOW) s3=true;
+    if (digitalRead(sensor4)==LOW) s4c++;
+    delay(10);
+  }
+  bool s4 = (s4c>=5);
 
-void loop()
-{
-    bool isConnected = (WiFi.status() == WL_CONNECTED);
+  String level;
+  if (s4&&s3&&s2&&s1) level="100%";
+  else if (s3&&s2&&s1) level="75%";
+  else if (s2&&s1) level="50%";
+  else if (s1) level="25%";
+  else level="0%";
 
-    if (!isConnected && !apModeLaunched && millis() - connectStartMillis > 30000)
-    {
-        WiFiManager wm;
-        wm.setAPCallback(configModeCallback);
-        wm.setConfigPortalTimeout(180);
-        wm.startConfigPortal("KBC-Setup", "12345678");
-        apModeLaunched = true;
-        isConnected = (WiFi.status() == WL_CONNECTED);
-    }
+  globalLevel = level;
 
-    if (isConnected && !wifiOK)
-    {
-        wifiOK = true;
-        timeClient.begin();
-        setupWebOTA();
-        setupWebLogServer();  // <-- NEW
+  // Update LCD - Level
+  lcd.setCursor(0,0); lcd.print("Water Level:");
+  lcd.setCursor(12,0); lcd.print(level + " ");
 
-        addLog("WiFi Connected: " + WiFi.localIP().toString());
+  // Auto motor logic (unchanged)
+  if (level=="0%" && !motorON) requestMotorOn("System", level);
+  if (level=="100%" && motorON) requestMotorOff("System");
 
-        lcd.clear();
-        lcd.setCursor(0,0); lcd.print("Water Level:");
-        lcd.setCursor(0,1); lcd.print("WiFi Connected");
-        delay(1500);
-    }
+  // Manual switch
+  int currentSwitch = digitalRead(switchPin);
+  if (lastSwitchState == HIGH && currentSwitch == LOW) {
+    if (motorON) requestMotorOff("Switch");
+    else requestMotorOn("Switch", level);
+    delay(80);
+  }
+  lastSwitchState = currentSwitch;
 
-    if (isConnected) server.handleClient();
-    logServer.handleClient();   // <-- NEW
+  // Update LCD - Bottom
+  lcd.setCursor(0,1);
+  if (motorON){
+    int mins=(millis()-motorTime)/60000;
+    char buf[17];
+    sprintf(buf,"Motor:ON %02dM",mins);
+    lcd.print(buf);
+  } else {
+    lcd.print("Motor:OFF ");
+    lcd.setCursor(10,1);
+    if (wifiOK) lcd.write(0);
+    else lcd.write(1);
+  }
 
-    espalexa.loop();
+  lcd.setCursor(11,1); lcd.print(currentTime);
 
-    // Time
-    if (isConnected && timeClient.update())
-    {
-        timeSynced = true;
-        lastSyncMillis = millis();
-        offsetSeconds =
-            timeClient.getSeconds() +
-            timeClient.getMinutes()*60 +
-            timeClient.getHours()*3600;
-    }
-
-    String timeStr = "--:--";
-    if (timeSynced)
-    {
-        unsigned long elapsed = (millis() - lastSyncMillis) / 1000;
-        unsigned long total = offsetSeconds + elapsed;
-
-        int h = (total / 3600) % 24;
-        int m = (total / 60) % 60;
-
-        char buf[6];
-        sprintf(buf, "%02d:%02d", h, m);
-        timeStr = buf;
-    }
-
-    // READ SENSORS
-    bool s1=false,s2=false,s3=false;
-    int s4c=0;
-    for (int i=0; i<7; i++) {
-        if (digitalRead(sensor1)==LOW) s1=true;
-        if (digitalRead(sensor2)==LOW) s2=true;
-        if (digitalRead(sensor3)==LOW) s3=true;
-        if (digitalRead(sensor4)==LOW) s4c++;
-        delay(10);
-    }
-    bool s4 = (s4c >= 5);
-
-    String level;
-    if (s4&&s3&&s2&&s1) level="100%";
-    else if (s3&&s2&&s1) level="75%";
-    else if (s2&&s1) level="50%";
-    else if (s1) level="25%";
-    else level="0%";
-
-    globalLevel = level;
-
-    lcd.setCursor(0,0);
-    lcd.print("Water Level:");
-    lcd.setCursor(12,0);
-    lcd.print(level + " ");
-
-    // AUTO MOTOR LOGIC
-    if (level=="0%" && !motorON) requestMotorOn("System", level);
-    if (level=="100%" && motorON) requestMotorOff("System");
-
-    // SWITCH
-    int sw = digitalRead(switchPin);
-    if (lastSwitchState == HIGH && sw == LOW)
-    {
-        if (motorON) requestMotorOff("Switch");
-        else requestMotorOn("Switch", level);
-        delay(80);
-    }
-    lastSwitchState = sw;
-
-    // LCD BOTTOM
-    lcd.setCursor(0,1);
-    if (motorON)
-    {
-        int mins = (millis() - motorTime)/60000;
-        char buf[16];
-        sprintf(buf, "Motor:ON %02dM", mins);
-        lcd.print(buf);
-    }
-    else
-    {
-        lcd.print("Motor:OFF ");
-        lcd.setCursor(10,1);
-        lcd.write(wifiOK ? 0 : 1);
-    }
-
-    lcd.setCursor(11,1);
-    lcd.print(timeStr);
-
-    delay(200);
+  delay(200);
 }
