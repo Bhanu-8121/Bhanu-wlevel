@@ -1,14 +1,3 @@
-/* Water motor Alexa - FINAL + WEB SERIAL MONITOR (PORT 82)
-   - Alexa on port 80
-   - OTA on port 81
-   - Serial monitor webpage on port 82 → http://<IP>/log
-   - Able to add device to alexa (bhanu updated)
-   - Manual switch on D4 (GPIO2)
-   - 100% tank lock
-   
-*/
-
-
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <ESP8266WiFi.h>
@@ -33,10 +22,7 @@ String serialBuffer = "";
 // Function to record logs
 void addLog(String msg) {
     Serial.println(msg);
-
     serialBuffer += msg + "\n";
-
-    // Limit size (keep last ~200 lines)
     if (serialBuffer.length() > 8000)
         serialBuffer.remove(0, 3000);
 }
@@ -85,8 +71,6 @@ void requestMotorOn(String source, String level)
     {
         motorON = false;
         digitalWrite(relayPin, LOW);
-        espalexa.getDevice(0)->setValue(0);
-
         addLog("BLOCKED: Tank full → ON rejected (" + source + ")");
         return;
     }
@@ -95,8 +79,6 @@ void requestMotorOn(String source, String level)
     digitalWrite(relayPin, HIGH);
     motorTime = millis();
 
-    espalexa.getDevice(0)->setValue(255);
-
     addLog("Motor ON by " + source);
 }
 
@@ -104,7 +86,6 @@ void requestMotorOff(String source)
 {
     motorON = false;
     digitalWrite(relayPin, LOW);
-    espalexa.getDevice(0)->setValue(0);
     addLog("Motor OFF by " + source);
 }
 
@@ -113,80 +94,54 @@ void requestMotorOff(String source)
 //              ALEXA CALLBACK
 // =========================================
 
-void alexaCallback(uint8_t id, bool state)
+// Espalexa passes brightness (0–255), not bool
+void alexaCallback(uint8_t brightness)
 {
     String level = globalLevel;
 
-    if (state) {
+    if (brightness == 0) {
+        requestMotorOff("Alexa");
+    }
+    else {
         if (level == "100%") {
             motorON = false;
             digitalWrite(relayPin, LOW);
-            espalexa.getDevice(0)->setValue(0);
             addLog("Alexa tried ON → BLOCKED (full tank)");
         }
         else requestMotorOn("Alexa", level);
     }
-    else requestMotorOff("Alexa");
 }
 
-
-// =========================================
-//              ALEXA SETUP
-// =========================================
 void setupAlexa()
 {
     espalexa.addDevice("Water Motor", alexaCallback);
     espalexa.begin();
     addLog("Alexa device added: Water Motor");
 }
-
-
-// =========================================
-//           WIFI MANAGER CALLBACK
-// =========================================
-
 void configModeCallback(WiFiManager *wm)
 {
     lcd.clear();
     lcd.setCursor(0, 0); lcd.print("Enter AP Mode");
     lcd.setCursor(0, 1); lcd.print("SSID:");
     lcd.setCursor(5, 1); lcd.print(wm->getConfigPortalSSID());
-
     addLog("Config Portal Started: " + wm->getConfigPortalSSID());
 }
-
-
-// =========================================
-//              OTA SETUP
-// =========================================
 
 void setupWebOTA()
 {
     httpUpdater.setup(&server, "/update", "kbc", "987654321");
     server.begin();
-
     addLog("OTA Ready: http://" + WiFi.localIP().toString() + ":81/update");
 }
-
-
-// =========================================
-//          WEB SERIAL MONITOR (82)
-// =========================================
 
 void setupWebLogServer()
 {
     logServer.on("/log", HTTP_GET, []() {
         logServer.send(200, "text/plain", serialBuffer);
     });
-
     logServer.begin();
     addLog("Web Serial Log ready: http://" + WiFi.localIP().toString() + ":82/log");
 }
-
-
-// =========================================
-//                 SETUP
-// =========================================
 
 void setup()
 {
@@ -198,10 +153,8 @@ void setup()
     pinMode(sensor4, INPUT_PULLUP);
     pinMode(relayPin, OUTPUT);
     digitalWrite(relayPin, LOW);
-
     pinMode(switchPin, INPUT_PULLUP);
 
-    // LCD
     Wire.begin(0, 5);
     lcd.init(); lcd.backlight();
     lcd.createChar(0, wifiOn);
@@ -225,11 +178,6 @@ void setup()
     setupAlexa();
 }
 
-
-// =========================================
-//                 LOOP
-// =========================================
-
 void loop()
 {
     bool isConnected = (WiFi.status() == WL_CONNECTED);
@@ -249,8 +197,7 @@ void loop()
         wifiOK = true;
         timeClient.begin();
         setupWebOTA();
-        setupWebLogServer();  // <-- NEW
-
+        setupWebLogServer();
         addLog("WiFi Connected: " + WiFi.localIP().toString());
 
         lcd.clear();
@@ -260,11 +207,9 @@ void loop()
     }
 
     if (isConnected) server.handleClient();
-    logServer.handleClient();   // <-- NEW
-
+    logServer.handleClient();
     espalexa.loop();
 
-    // Time
     if (isConnected && timeClient.update())
     {
         timeSynced = true;
@@ -280,10 +225,8 @@ void loop()
     {
         unsigned long elapsed = (millis() - lastSyncMillis) / 1000;
         unsigned long total = offsetSeconds + elapsed;
-
         int h = (total / 3600) % 24;
         int m = (total / 60) % 60;
-
         char buf[6];
         sprintf(buf, "%02d:%02d", h, m);
         timeStr = buf;
@@ -315,11 +258,9 @@ void loop()
     lcd.setCursor(12,0);
     lcd.print(level + " ");
 
-    // AUTO MOTOR LOGIC
     if (level=="0%" && !motorON) requestMotorOn("System", level);
     if (level=="100%" && motorON) requestMotorOff("System");
 
-    // SWITCH
     int sw = digitalRead(switchPin);
     if (lastSwitchState == HIGH && sw == LOW)
     {
@@ -329,7 +270,6 @@ void loop()
     }
     lastSwitchState = sw;
 
-    // LCD BOTTOM
     lcd.setCursor(0,1);
     if (motorON)
     {
@@ -350,4 +290,3 @@ void loop()
 
     delay(200);
 }
-
