@@ -213,6 +213,9 @@ void setup()
 
   // Register Alexa device
   espalexa.addDevice("Water Motor", alexaCallback);
+
+  // ⭐ REQUIRED FIX
+  espalexa.begin();   // <-- This makes Alexa discoverable immediately
 }
 
 // ======================================
@@ -241,7 +244,6 @@ void loop()
     setupWebOTA();
     setupWebLogServer();
     alexaServerSetup();
-    espalexa.begin();
 
     addLog("WiFi Connected: " + WiFi.localIP().toString());
 
@@ -274,7 +276,7 @@ void loop()
     int m = (total/60) % 60;
 
     char buf[6];
-    sprintf(buf, "%02d:%02d", h, m);
+    sprintf(buf,"%02d:%02d",h,m);
     timeStr = buf;
   }
 
