@@ -2,9 +2,12 @@
    - Alexa on port 80
    - OTA on port 81
    - Serial monitor webpage on port 82 → http://<IP>/log
+   - Able to add device to alexa (bhanu updated)
    - Manual switch on D4 (GPIO2)
    - 100% tank lock
+   
 */
+
 
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
