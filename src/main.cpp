@@ -106,9 +106,7 @@ void alexaCallback(uint8_t id, bool state)
 
   if (state) {
     if (level == "100%") {
-      motorON = false;
-      digitalWrite(relayPin, LOW);
-      espalexa.getDevice(0)->setValue(0);
+      requestMotorOff("Alexa (Blocked)");
       addLog("Alexa → ON BLOCKED (100%)");
     } else {
       requestMotorOn("Alexa", level);
@@ -163,7 +161,7 @@ void setupWebLogServer()
 }
 
 // ======================================
-// WiFi Manager AP screen
+// WiFi Manager AP Mode
 // ======================================
 void configModeCallback(WiFiManager *wm)
 {
@@ -171,7 +169,6 @@ void configModeCallback(WiFiManager *wm)
   lcd.setCursor(0,0); lcd.print("Enter AP Mode");
   lcd.setCursor(0,1); lcd.print("SSID:");
   lcd.setCursor(5,1); lcd.print(wm->getConfigPortalSSID());
-
   addLog("Config Portal: " + wm->getConfigPortalSSID());
 }
 
@@ -200,7 +197,8 @@ void setup()
 
   lcd.setCursor(6,0); lcd.print("K.B.C");
   lcd.setCursor(0,1); lcd.print("Home Automation");
-  delay(2000); lcd.clear();
+  delay(2000); 
+  lcd.clear();
 
   lcd.setCursor(0,0); lcd.print("Water Level:");
   lcd.setCursor(0,1); lcd.print("Motor:OFF ");
@@ -213,9 +211,6 @@ void setup()
 
   // Register Alexa device
   espalexa.addDevice("Water Motor", alexaCallback);
-
-  // ⭐ REQUIRED FIX
-  espalexa.begin();   // <-- This makes Alexa discoverable immediately
 }
 
 // ======================================
@@ -243,7 +238,9 @@ void loop()
     timeClient.begin();
     setupWebOTA();
     setupWebLogServer();
-    alexaServerSetup();
+
+    alexaServerSetup();  // Start HTTP server
+    espalexa.begin();    // ⭐ MUST be after alexaServerSetup()
 
     addLog("WiFi Connected: " + WiFi.localIP().toString());
 
@@ -261,13 +258,13 @@ void loop()
   if (isConnected && timeClient.update()) {
     timeSynced = true;
     lastSyncMillis = millis();
-    offsetSeconds = timeClient.getHours()*3600 +
-                    timeClient.getMinutes()*60 +
-                    timeClient.getSeconds();
+    offsetSeconds =
+      timeClient.getHours()*3600 +
+      timeClient.getMinutes()*60 +
+      timeClient.getSeconds();
   }
 
   String timeStr = "--:--";
-
   if (timeSynced) {
     unsigned long elapsed = (millis() - lastSyncMillis)/1000;
     unsigned long total = offsetSeconds + elapsed;
