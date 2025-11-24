@@ -1,4 +1,3 @@
-
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <ESP8266WiFi.h>
@@ -7,27 +6,41 @@
 #include <ESP8266WebServer.h>
 #include <ESP8266HTTPUpdateServer.h>
 #include <WiFiManager.h>
+#include <Espalexa.h>
+// ==== Alexa ====
+Espalexa espalexa;
 
-// ===== WEB OTA =====
-ESP8266WebServer server(80);
+// ==== OTA on port 81 ====
+ESP8266WebServer server(81);
 ESP8266HTTPUpdateServer httpUpdater;
 
-// ===== WIFI =====
+// ==== WEB SERIAL MONITOR on port 82 ====
+ESP8266WebServer logServer(82);
+String serialBuffer = "";
+
+// Function to record logs
+void addLog(String msg) {
+    Serial.println(msg);
+    serialBuffer += msg + "\n";
+    if (serialBuffer.length() > 8000)
+        serialBuffer.remove(0, 3000);
+}
+// ==== WIFI / TIME ====
 WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "pool.ntp.org", 19800, 60000); // IST
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 19800, 60000);
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);
-
-// WiFi Symbols
+// WiFi Icons
 byte wifiOn[8] = {B00000,B01110,B10001,B00100,B01010,B00000,B00100,B00000};
 byte wifiOff[8] = {B10001,B11111,B11011,B00100,B01010,B10001,B10101,B00000};
 
 // Pins
-const int sensor1 = 14; // D5
-const int sensor2 = 12; // D6
-const int sensor3 = 13; // D7
-const int sensor4 = 4; // D2
-const int relayPin = 16; // D0
+const int sensor1 = 14;
+const int sensor2 = 12;
+const int sensor3 = 13;
+const int sensor4 = 4;
+const int relayPin = 16;
+const int switchPin = 2;
 
 // WiFi state
 bool wifiOK = false;
@@ -44,68 +57,139 @@ bool timeSynced = false;
 unsigned long lastSyncMillis = 0;
 unsigned long offsetSeconds = 0;
 
+
 // BLINK variables
 unsigned long blinkTicker = 0;
 bool blinkState = false;
 
-// ===== WiFiManager Callback =====
-void configModeCallback(WiFiManager *myWiFiManager) {
-lcd.clear();
-lcd.setCursor(0, 0); lcd.print("Enter AP Mode");
-lcd.setCursor(0, 1); lcd.print("SSID:");
-lcd.setCursor(5, 1); lcd.print(myWiFiManager->getConfigPortalSSID());
-Serial.println("Entered config mode");
-Serial.println(WiFi.softAPIP());
-Serial.println(myWiFiManager->getConfigPortalSSID());
+
+String globalLevel = "0%";
+int lastSwitchState = HIGH;
+
+
+// =========================================
+//        MOTOR CONTROL SAFE LOGIC
+// =========================================
+
+void requestMotorOn(String source, String level)
+{
+    if (level == "100%")
+    {
+        motorON = false;
+        digitalWrite(relayPin, LOW);
+        addLog("BLOCKED: Tank full → ON rejected (" + source + ")");
+        return;
+    }
+
+    motorON = true;
+    digitalWrite(relayPin, HIGH);
+    motorTime = millis();
+
+    addLog("Motor ON by " + source);
 }
 
+void requestMotorOff(String source)
+{
+    motorON = false;
+    digitalWrite(relayPin, LOW);
+    addLog("Motor OFF by " + source);
+}
+
+
+// =========================================
+//              ALEXA CALLBACK
+// =========================================
+
+// Espalexa passes brightness (0–255), not bool
+void alexaCallback(uint8_t brightness)
+{
+    String level = globalLevel;
+
+    if (brightness == 0) {
+        requestMotorOff("Alexa");
+    }
+    else {
+        if (level == "100%") {
+            motorON = false;
+            digitalWrite(relayPin, LOW);
+            addLog("Alexa tried ON → BLOCKED (full tank)");
+        }
+        else requestMotorOn("Alexa", level);
+    }
+}
+
+void setupAlexa()
+{
+    espalexa.addDevice("Water Motor", alexaCallback);
+    espalexa.begin();
+    addLog("Alexa device added: Water Motor");
+}
+
+// ===== WiFiManager Callback =====
+void configModeCallback(WiFiManager *wm)
+{
+    lcd.clear();
+    lcd.setCursor(0, 0); lcd.print("Enter AP Mode");
+    lcd.setCursor(0, 1); lcd.print("SSID:");
+    lcd.setCursor(5, 1); lcd.print(wm->getConfigPortalSSID());
+    addLog("Config Portal Started: " + wm->getConfigPortalSSID());
+}
 
 // ===== WEB OTA SETUP (iPhone-compatible) =====
-void setupWebOTA() {
-httpUpdater.setup(&server, "/update", "kbc", "987654321");
-server.begin();
-Serial.println("WEB OTA Ready!");
-Serial.print("Go to: http://");
-Serial.print(WiFi.localIP());
-Serial.println("/update");
+void setupWebOTA()
+{
+    httpUpdater.setup(&server, "/update", "kbc", "987654321");
+    server.begin();
+    addLog("OTA Ready: http://" + WiFi.localIP().toString() + ":81/update");
+}
+// ===== WEB LOG  SETUP (iPhone-compatible) =====
+void setupWebLogServer()
+{
+    logServer.on("/log", HTTP_GET, []() {
+        logServer.send(200, "text/plain", serialBuffer);
+    });
+    logServer.begin();
+    addLog("Web Serial Log ready: http://" + WiFi.localIP().toString() + ":82/log");
 }
 
+void setup()
+{
+    Serial.begin(115200);
 
-void setup() {
-Serial.begin(115200);
+    pinMode(sensor1, INPUT_PULLUP);
+    pinMode(sensor2, INPUT_PULLUP);
+    pinMode(sensor3, INPUT_PULLUP);
+    pinMode(sensor4, INPUT_PULLUP);
+    pinMode(relayPin, OUTPUT);
+    digitalWrite(relayPin, LOW);
+    pinMode(switchPin, INPUT_PULLUP);
 
-pinMode(sensor1, INPUT_PULLUP);
-pinMode(sensor2, INPUT_PULLUP);
-pinMode(sensor3, INPUT_PULLUP);
-pinMode(sensor4, INPUT_PULLUP);
-pinMode(relayPin, OUTPUT);
-digitalWrite(relayPin, LOW);
+    Wire.begin(0, 5);
+    lcd.init(); lcd.backlight();
+    lcd.createChar(0, wifiOn);
+    lcd.createChar(1, wifiOff);
 
-Wire.begin(0, 5);
-lcd.init(); lcd.backlight();
-lcd.createChar(0, wifiOn);
-lcd.createChar(1, wifiOff);
+    lcd.setCursor(6,0); lcd.print("K.B.C");
+    lcd.setCursor(0,1); lcd.print("Home Automation");
+    delay(2000);
+    lcd.clear();
 
-lcd.setCursor(6,0); lcd.print("K.B.C");
-lcd.setCursor(0,1); lcd.print("Home Automation");
-delay(2000); lcd.clear();
+    lcd.setCursor(0,0); lcd.print("Water Level:");
+    lcd.setCursor(0,1); lcd.print("Motor:OFF ");
+    lcd.setCursor(10,1); lcd.write(1);
+    lcd.setCursor(11,1); lcd.print("--:--");
 
-// Print the default "offline" screen
-lcd.setCursor(0,0); lcd.print("Water Level:");
-lcd.setCursor(0,1); lcd.print("Motor:OFF ");
-lcd.setCursor(10,1); lcd.write(1); // Show WiFi Off icon
-lcd.setCursor(11,1); lcd.print("--:--");
+    WiFi.setAutoReconnect(true);
+    WiFi.begin();
+    connectStartMillis = millis();
 
-// Start non-blocking WiFi connection
-WiFi.setAutoReconnect(true);
-WiFi.begin();
-connectStartMillis = millis();
+    addLog("Booting...");
+    setupAlexa();
 }
-
-void loop() {
 
 // --- WiFi/AP Manager Logic ---
 bool isConnected = (WiFi.status() == WL_CONNECTED);
+
 
 // Check if 30s have passed, we're not connected, and we haven't launched the AP yet
 if (!isConnected && !apModeLaunched && (millis() - connectStartMillis > 30000)) {
@@ -127,7 +211,6 @@ apModeLaunched = true; // Set flag so we don't run this again
 isConnected = (WiFi.status() == WL_CONNECTED);
 }
 // --- End WiFi/AP Logic ---
-
 
 // This must be checked every loop
 if (isConnected) {
@@ -155,6 +238,9 @@ lcd.setCursor(0,1); lcd.print(" "); // Clear bottom line
 Serial.print("IP: ");
 Serial.println(WiFi.localIP());
 }
+  if (isConnected) server.handleClient();
+    logServer.handleClient();
+    espalexa.loop();
 
 // This block runs once when WiFi disconnects
 if (!isConnected && wifiOK) {
@@ -256,4 +342,6 @@ lcd.setCursor(11,1); lcd.print(currentTime);
 
 delay(200);
 }
+
+
 
