@@ -1,5 +1,3 @@
-
-
 //Alexa working
 # include <Wire.h>
 #include <LiquidCrystal_I2C.h>
@@ -22,28 +20,33 @@ ESP8266HTTPUpdateServer httpUpdater;
 ESP8266WebServer logServer(82);
 String serialBuffer = "";
 
-// Function to record logs
+// --- Timestamped LOG function (safe patch) ---
+
+extern bool timeSynced;
+extern unsigned long lastSyncMillis;
+extern unsigned long offsetSeconds;
 
 void addLog(String msg) {
+    String prefix;
 
-    // Build timestamp using soft RTC
-    String ts = "--:--";
     if (timeSynced) {
-        unsigned long elapsed = (millis() - lastSyncMillis)/1000;
+        unsigned long elapsed = (millis() - lastSyncMillis) / 1000;
         unsigned long total = offsetSeconds + elapsed;
-        int h = (total/3600) % 24;
-        int m = (total/60) % 60;
 
-        char buf[6];
-        sprintf(buf, "%02d:%02d", h, m);
-        ts = String(buf);
+        int h = (total / 3600) % 24;
+        int m = (total / 60) % 60;
+        int s = total % 60;
+
+        char buff[20];
+        sprintf(buff, "[%02d:%02d:%02d] ", h, m, s);
+        prefix = String(buff);
+    } else {
+        prefix = "[--:--:--] ";
     }
 
-    // Final log line
-    String line = "[" + ts + "] " + msg;
+    String line = prefix + msg;
 
     Serial.println(line);
-
     serialBuffer += line + "\n";
 
     if (serialBuffer.length() > 8000)
@@ -251,15 +254,7 @@ void loop()
         // After a successful connection, disable future AP attempts
         apModeLaunched = true;
 
-   /*     lcd.clear();
-        lcd.setCursor(0,0); lcd.print("Water Level:");
-        lcd.setCursor(0,1); lcd.print("WiFi Connected ");
-        delay(1500);
-        lcd.setCursor(0,1); lcd.print("Motor:OFF ");
-        lcd.setCursor(10,1); lcd.write(0);
-
-        addLog("WiFi Connected: " + WiFi.localIP().toString());*/
-     // --showing ip address here -------
+       // --showing ip address here -------
     lcd.clear();
     lcd.setCursor(0,0); 
     lcd.print("WiFi Connected");
@@ -389,3 +384,4 @@ void loop()
 
     delay(200);
 }
+
