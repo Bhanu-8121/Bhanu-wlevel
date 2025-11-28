@@ -237,7 +237,7 @@ void loop()
         lcd.setCursor(10,1); lcd.write(0);
 
         addLog("WiFi Connected: " + WiFi.localIP().toString());*/
-      -------
+     // showing ip address here -------
     lcd.clear();
     lcd.setCursor(0,0); 
     lcd.print("WiFi Connected");
