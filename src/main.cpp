@@ -1,4 +1,4 @@
-V6 
+
 
 //Alexa working
 # include <Wire.h>
