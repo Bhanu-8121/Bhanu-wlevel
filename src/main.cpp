@@ -1,3 +1,5 @@
+V6 
+
 //Alexa working
 # include <Wire.h>
 #include <LiquidCrystal_I2C.h>
@@ -21,9 +23,29 @@ ESP8266WebServer logServer(82);
 String serialBuffer = "";
 
 // Function to record logs
+
 void addLog(String msg) {
-    Serial.println(msg);
-    serialBuffer += msg + "\n";
+
+    // Build timestamp using soft RTC
+    String ts = "--:--";
+    if (timeSynced) {
+        unsigned long elapsed = (millis() - lastSyncMillis)/1000;
+        unsigned long total = offsetSeconds + elapsed;
+        int h = (total/3600) % 24;
+        int m = (total/60) % 60;
+
+        char buf[6];
+        sprintf(buf, "%02d:%02d", h, m);
+        ts = String(buf);
+    }
+
+    // Final log line
+    String line = "[" + ts + "] " + msg;
+
+    Serial.println(line);
+
+    serialBuffer += line + "\n";
+
     if (serialBuffer.length() > 8000)
         serialBuffer.remove(0, 3000);
 }
@@ -367,5 +389,3 @@ void loop()
 
     delay(200);
 }
-
-
