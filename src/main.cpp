@@ -246,42 +246,42 @@ void loop()
   if (alexaStarted) espalexa.loop();
 
   // Runs once when WiFi connects (or reconnects)
-  if (isConnected && !wifiOK) {
+if (isConnected && !wifiOK) {
     wifiOK = true;
 
-    // NTP
+    // Start NTP
     timeClient.begin();
 
-    // start OTA and logs
+    // Start OTA + logs
     setupWebOTA();
     setupWebLogServer();
 
-    // Start Espalexa now that WiFi is available
-    if (!alexaStarted) {
-      espalexa.begin();
-      alexaStarted = true;
-      addLog("Espalexa started (Alexa discoverable).");
-    }
+    // Alexa was already started in setup() so no need to start here.
+    // Just log it:
+    addLog("WiFi Connected – Alexa active.");
 
-    // After a successful connection, disable future AP attempts as per requirement A
+    // Disable AP mode future attempts
     apModeLaunched = true;
 
-    // show IP on LCD
-    lcd.clear();
-    lcd.setCursor(0,0);
-    lcd.print("WiFi Connected");
-    lcd.setCursor(0,1);
-    lcd.print(WiFi.localIP().toString());
-    delay(2000);
+    // -------- SHOW IP WITHOUT BREAKING UI --------
+    // Save current screen content
+    char line1[17], line2[17];
+    lcd.setCursor(0,0); for(int i=0;i<16;i++) line1[i] = lcd.read();
+    lcd.setCursor(0,1); for(int i=0;i<16;i++) line2[i] = lcd.read();
 
-    // return to normal screen
+    // Display connection message
     lcd.clear();
-    lcd.setCursor(0,0); lcd.print("Water Level:");
-    lcd.setCursor(0,1); lcd.print("Motor:OFF ");
-    lcd.setCursor(10,1); lcd.write(0);
+    lcd.setCursor(0,0); lcd.print("WiFi Connected");
+    lcd.setCursor(0,1); lcd.print(WiFi.localIP().toString());
+    delay(2200);
+
+    // -------- RESTORE EXACT OLD SCREEN --------
+    lcd.clear();
+    lcd.setCursor(0,0); for(int i=0;i<16;i++) lcd.print(line1[i]);
+    lcd.setCursor(0,1); for(int i=0;i<16;i++) lcd.print(line2[i]);
 
     addLog("WiFi Connected: " + WiFi.localIP().toString());
-  }
+}
 
   // Runs once when WiFi disconnects
   if (!isConnected && wifiOK) {
@@ -391,3 +391,4 @@ void loop()
 
   delay(200);
 }
+
