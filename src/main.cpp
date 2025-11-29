@@ -12,6 +12,9 @@
 // ==== Alexa ====
 Espalexa espalexa;
 
+// wifi manager
+WiFiManager wm; 
+
 // ==== OTA on port 81 ====
 ESP8266WebServer server(81);
 ESP8266HTTPUpdateServer httpUpdater;
@@ -220,23 +223,21 @@ void loop()
     // Connection state
     bool isConnected = (WiFi.status() == WL_CONNECTED);
 
-    // --- WiFi/AP Manager Logic ---
-    if (!isConnected && !apModeLaunched && (millis() - connectStartMillis > 30000)) {
-        addLog("30s timeout. Launching Config Portal...");
-        WiFiManager wm;
-        wm.setAPCallback(configModeCallback);
-        wm.setConfigPortalTimeout(180); // 3 minutes
-        if (wm.startConfigPortal("KBC-Setup", "12345678")) {
-            addLog("AP connection successful!");
-        } else {
-            addLog("AP timeout. Running offline.");
-        }
-        apModeLaunched = true; // run only once
-        // Re-evaluate connection after AP
-        isConnected = (WiFi.status() == WL_CONNECTED);
-    }
-    // --- End WiFi/AP Logic ---
+// --- WiFi/AP Manager Logic ---
+if (!isConnected && !apModeLaunched && (millis() - connectStartMillis > 30000)) {
+    addLog("30s timeout → Starting AP Mode");
+    wm.setAPCallback(configModeCallback);
+    wm.setConfigPortalTimeout(180);            // 3 min
+    wm.setDebugOutput(true);                   // DEBUG ENABLED
+    bool res = wm.startConfigPortal("KBC-Setup", "12345678");
+    if (res) addLog("WiFi Saved → Connected");
+    else     addLog("AP Timeout → Continuing Offline");
+    apModeLaunched = true;
+    isConnected = (WiFi.status() == WL_CONNECTED);
+}
+// --- End WiFi/AP Logic ---
 
+   
     // Handle servers every loop
     if (isConnected) {
         server.handleClient();   // OTA
