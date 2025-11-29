@@ -1,3 +1,4 @@
+
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <ESP8266WiFi.h>
@@ -246,42 +247,44 @@ void loop()
   if (alexaStarted) espalexa.loop();
 
   // Runs once when WiFi connects (or reconnects)
+
 if (isConnected && !wifiOK) {
     wifiOK = true;
 
-    // Start NTP
+    // NTP
     timeClient.begin();
 
-    // Start OTA + logs
+    // start OTA and logs
     setupWebOTA();
     setupWebLogServer();
 
-    // Alexa was already started in setup() so no need to start here.
-    // Just log it:
-    addLog("WiFi Connected – Alexa active.");
+    // Start Espalexa now that WiFi is available
+    if (!alexaStarted) {
+      espalexa.begin();
+      alexaStarted = true;
+      addLog("Espalexa started (Alexa discoverable).");
+    }
 
-    // Disable AP mode future attempts
+    // After a successful connection, disable future AP attempts
     apModeLaunched = true;
 
-    // -------- SHOW IP WITHOUT BREAKING UI --------
-    // Save current screen content
-    char line1[17], line2[17];
-    lcd.setCursor(0,0); for(int i=0;i<16;i++) line1[i] = lcd.read();
-    lcd.setCursor(0,1); for(int i=0;i<16;i++) line2[i] = lcd.read();
-
-    // Display connection message
+    // show IP on LCD
     lcd.clear();
-    lcd.setCursor(0,0); lcd.print("WiFi Connected");
-    lcd.setCursor(0,1); lcd.print(WiFi.localIP().toString());
-    delay(2200);
+    lcd.setCursor(0,0);
+    lcd.print("WiFi Connected");
+    lcd.setCursor(0,1);
+    lcd.print(WiFi.localIP().toString());
+    delay(2000);
 
-    // -------- RESTORE EXACT OLD SCREEN --------
+    // return to normal screen
     lcd.clear();
-    lcd.setCursor(0,0); for(int i=0;i<16;i++) lcd.print(line1[i]);
-    lcd.setCursor(0,1); for(int i=0;i<16;i++) lcd.print(line2[i]);
+    lcd.setCursor(0,0); lcd.print("Water Level:");
+    lcd.setCursor(0,1); lcd.print("Motor:OFF ");
+    lcd.setCursor(10,1); lcd.write(0);
 
     addLog("WiFi Connected: " + WiFi.localIP().toString());
-}
+  }
+
 
   // Runs once when WiFi disconnects
   if (!isConnected && wifiOK) {
@@ -391,4 +394,3 @@ if (isConnected && !wifiOK) {
 
   delay(200);
 }
-
