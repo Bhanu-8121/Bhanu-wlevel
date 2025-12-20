@@ -49,7 +49,7 @@ void addLog(String msg) {
   }
 
   String line = "[" + ts + "] " + msg;
-  Serial.println(line);
+ // Serial.println(line);
   serialBuffer += line + "\n";
   if (serialBuffer.length() > 15000) serialBuffer.remove(0, 5000);
 }
@@ -68,10 +68,9 @@ byte wifiOff[8] = {B10001,B11111,B11011,B00100,B01010,B10001,B10101,B00000};
 const int sensor1 = 14; // D5
 const int sensor2 = 12; // D6
 const int sensor3 = 13; // D7
-const int sensor4 = 4;  // D2
+const int sensor4 = 5;  // D1  moved from d2
 const int relayPin = 16; // D0
-const int switchPin = 2; // D4 in your request earlier? (You previously asked D4 — that's GPIO2 on NodeMCU. Ensure wiring matches)
-
+const int switchPin = 3; // rx (moved here to fress up d4 for lcd)
 // NOTE: You told "Use D4" for push button. On NodeMCU D4 is GPIO2. Above we already set switchPin=2 to match D4.
 
 // WiFi state
@@ -175,7 +174,7 @@ void setupWebLogServer()
 // ================== SETUP ==================
 void setup()
 {
-  Serial.begin(115200);
+//  Serial.begin(115200); 
   addLog("Booting...");
 
   pinMode(sensor1, INPUT_PULLUP);
@@ -187,7 +186,7 @@ void setup()
 
   digitalWrite(relayPin, LOW);
 
-  Wire.begin(0,5);
+  Wire.begin(0,2);  //lcd d3 to SDA, d4 to scl
   lcd.init();
   lcd.backlight();
   lcd.createChar(0, wifiOn);
@@ -316,24 +315,20 @@ if (isConnected && !wifiOK) {
   }
 
   // --- Sensor reading with de-bounce ---
-  bool s1=false, s2=false, s3=false;
-  int s4c = 0;
-  for (int i=0; i<7; i++) {
-    if (digitalRead(sensor1) == LOW) s1 = true;
-    if (digitalRead(sensor2) == LOW) s2 = true;
-    if (digitalRead(sensor3) == LOW) s3 = true;
-    if (digitalRead(sensor4) == LOW) s4c++;
-    delay(10);
-  }
-  bool s4 = (s4c >= 5);
+  // --- New Sensor Reading (Simple & Fast) ---
+  bool s1 = (digitalRead(sensor1) == LOW);
+  bool s2 = (digitalRead(sensor2) == LOW);
+  bool s3 = (digitalRead(sensor3) == LOW);
+  bool s4 = (digitalRead(sensor4) == LOW);
 
-  // Level logic
+  // --- New Level Logic (Priority Based) ---
+  // We check from the top down. If the highest sensor is wet, that is the level.
   String level;
-  if (s4 && s3 && s2 && s1) level = "100%";
-  else if (s3 && s2 && s1) level = "75%";
-  else if (s2 && s1) level = "50%";
+  if (s4)      level = "100%";
+  else if (s3) level = "75%";
+  else if (s2) level = "50%";
   else if (s1) level = "25%";
-  else level = "0%";
+  else         level = "0%";
 
   globalLevel = level; // keep Alexa logic in sync
 
