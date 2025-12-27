@@ -104,20 +104,20 @@ void requestMotorOn(String source, String level)
   if (level == "100%") {
     motorON = false;
     digitalWrite(relayPin, LOW);
-    addLog("BLOCKED: Tank full → ON rejected (" + source + ")");
+    addLog("BLOCKED: Tank full -> ON rejected (" + source + ") | Level: " + level);
     return;
   }
   motorON = true;
   digitalWrite(relayPin, HIGH);
   motorTime = millis();
-  addLog("Motor ON by " + source);
+  addLog("Motor ON by " + source + " | Level: " + level); 
 }
 
 void requestMotorOff(String source)
 {
   motorON = false;
   digitalWrite(relayPin, LOW);
-  addLog("Motor OFF by " + source);
+  addLog("Motor OFF by " + source + " | Level: " + globalLevel);
 }
 
 // =========================================
@@ -213,6 +213,15 @@ void setup()
 
   // Register Alexa device (do NOT begin yet)
   setupAlexa();
+  timeClient.begin();
+  // --- NEW: Wait for NTP Sync to fix 1970 date issue ---
+  unsigned long startSync = millis();
+  while (!timeClient.update() && millis() - startSync < 5000) {
+    delay(200); // Wait up to 5 seconds for internet time
+  }
+
+  // Force an initial log so you see the level immediately on boot
+  addLog("System Initialized. Current Level: " + globalLevel);
 }
 
 // =========================================
@@ -256,7 +265,7 @@ if (isConnected && !wifiOK) {
     wifiOK = true;
 
     // NTP
-    timeClient.begin();
+  //  timeClient.begin();
 
     // start OTA and logs
     setupWebOTA();
@@ -337,7 +346,7 @@ if (isConnected && !wifiOK) {
 
   globalLevel = level; // keep Alexa logic in sync
 
-  // --- ADD THIS LOGIC STARTING AT LINE 337 for level updaet in log ---
+  // --- ADD THIS LOGIC STARTING AT LINE 349 for level updaet in log ---
   if (globalLevel != lastLoggedLevel) {
     addLog("Water Level: " + globalLevel);
     lastLoggedLevel = globalLevel; 
