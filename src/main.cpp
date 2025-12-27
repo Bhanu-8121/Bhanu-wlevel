@@ -27,6 +27,9 @@ bool timeSynced = false;
 unsigned long lastSyncMillis = 0;
 unsigned long offsetSeconds = 0;
 
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 19800);
+
 void addLog(String msg) {
   // 1. Get the current calendar date and time from the NTP Client
   time_t rawtime = timeClient.getEpochTime();
