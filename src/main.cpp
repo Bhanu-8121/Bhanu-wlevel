@@ -61,8 +61,8 @@ void addLog(String msg) {
 }
 
 // ==== WIFI / TIME ====
-WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "pool.ntp.org", 19800, 60000); // IST offset
+//WiFiUDP ntpUDP;
+//NTPClient timeClient(ntpUDP, "pool.ntp.org", 19800, 60000); // IST offset
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
