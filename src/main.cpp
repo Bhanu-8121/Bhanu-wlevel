@@ -8,6 +8,7 @@
 #include <ESP8266HTTPUpdateServer.h>
 #include <WiFiManager.h>
 #include <Espalexa.h>
+String lastLoggedLevel = "";
 
 // ==== Alexa ====
 Espalexa espalexa;
@@ -27,31 +28,33 @@ unsigned long lastSyncMillis = 0;
 unsigned long offsetSeconds = 0;
 
 void addLog(String msg) {
-  String ts = "--:--:--";
-  if (timeSynced) {
-    unsigned long elapsed = (millis() - lastSyncMillis) / 1000;
-    unsigned long total = offsetSeconds + elapsed;
-    int hh = (total / 3600) % 24;
-    int mm = (total / 60) % 60;
-    int ss = total % 60;
-    char buf[16];
-    sprintf(buf, "%02d:%02d:%02d", hh, mm, ss);
-    ts = String(buf);
-  } else {
-    // Fallback: use uptime seconds
-    unsigned long s = millis() / 1000;
-    unsigned long hh = s / 3600;
-    unsigned long mm = (s / 60) % 60;
-    unsigned long ss = s % 60;
-    char buf[16];
-    sprintf(buf, "%02lu:%02lu:%02lu", hh, mm, ss);
-    ts = String(buf);
-  }
+  // 1. Get the current calendar date and time from the NTP Client
+  time_t rawtime = timeClient.getEpochTime();
+  struct tm * ti;
+  ti = localtime(&rawtime);
 
-  String line = "[" + ts + "] " + msg;
- // Serial.println(line);
+  // 2. Format as DD-MM-YYYY HH:MM:SS
+  char dateBuffer[25];
+  sprintf(dateBuffer, "%02d-%02d-%04d %02d:%02d:%02d", 
+          ti->tm_mday, 
+          ti->tm_mon + 1, 
+          ti->tm_year + 1900, 
+          ti->tm_hour, 
+          ti->tm_min, 
+          ti->tm_sec);
+
+  // 3. Create the log line with the new date format
+  String line = "[" + String(dateBuffer) + "] " + msg;
+  
+  // Serial.println(line); // DO NOT UNCOMMENT - Keeps RX pin safe for switch
+  
+  // 4. Add to the web buffer
   serialBuffer += line + "\n";
-  if (serialBuffer.length() > 15000) serialBuffer.remove(0, 5000);
+  
+  // 5. Keep buffer from getting too large (reduced to 5000 for better stability)
+  if (serialBuffer.length() > 5000) {
+    serialBuffer = serialBuffer.substring(serialBuffer.indexOf('\n', 500) + 1);
+  }
 }
 
 // ==== WIFI / TIME ====
@@ -332,6 +335,13 @@ if (isConnected && !wifiOK) {
 
   globalLevel = level; // keep Alexa logic in sync
 
+  // --- ADD THIS LOGIC STARTING AT LINE 337 for level updaet in log ---
+  if (globalLevel != lastLoggedLevel) {
+    addLog("Water Level: " + globalLevel);
+    lastLoggedLevel = globalLevel; 
+  }
+  // --- END OF NEW log LOGIC ---
+  
   // Update LCD - Level (top line)
   lcd.setCursor(0,0);
   lcd.print("Water Level:");
