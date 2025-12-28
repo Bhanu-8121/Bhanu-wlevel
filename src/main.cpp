@@ -170,11 +170,31 @@ void setupWebOTA()
 void setupWebLogServer()
 {
   logServer.on("/log", HTTP_GET, []() {
-    logServer.send(200, "text/plain", serialBuffer);
+    // 1. Construct the "Virtual LCD" lines based on current data
+    String lcdLine1 = "Water Level: " + globalLevel;
+    
+    // Calculate motor status and runtime if it's ON
+    String motorStatus = motorON ? "ON " + String((millis() - motorTime) / 60000) + "M" : "OFF";
+    
+    // Get the current time formatted just like the LCD
+    String lcdLine2 = "Motor: " + motorStatus + "      " + timeClient.getFormattedTime().substring(0, 5);
+
+    // 2. Build the full web output string
+    String webOutput = "--- LIVE LCD DISPLAY ---\n";
+    webOutput += "[" + lcdLine1 + "]\n";
+    webOutput += "[" + lcdLine2 + "]\n";
+    webOutput += "------------------------\n\n";
+    webOutput += "--- SYSTEM LOGS ---\n";
+    webOutput += serialBuffer;
+
+    // 3. Send the final page to your browser
+    logServer.send(200, "text/plain", webOutput);
   });
+  
   logServer.begin();
   addLog("Web Serial Log ready: http://" + WiFi.localIP().toString() + ":82/log");
 }
+
 
 // ================== SETUP ==================
 void setup()
